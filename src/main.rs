@@ -1,8 +1,11 @@
-use axum::{extract::Json, response::IntoResponse, routing::post, Router};
+use axum::{extract::Json, http::StatusCode, response::IntoResponse, routing::post, Router};
 use serde_json::Value;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tracing;
 use tracing_subscriber;
+
+mod conversion;
 
 #[tokio::main]
 async fn main() {
@@ -17,5 +20,21 @@ async fn main() {
 }
 
 async fn handle_query(Json(payload): Json<Value>) -> impl IntoResponse {
-    Json(payload)
+    tracing::info!("Received query: {:?}", payload);
+
+    match conversion::convert_subgraph_to_hyperindex(&payload) {
+        Ok(converted_query) => {
+            tracing::info!("Converted query: {:?}", converted_query);
+            (StatusCode::OK, Json(converted_query))
+        }
+        Err(e) => {
+            tracing::error!("Conversion error: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": e.to_string()
+                })),
+            )
+        }
+    }
 }
