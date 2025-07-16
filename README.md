@@ -157,6 +157,8 @@ query {
 2. **Basic Parsing**: Uses simple string parsing instead of a proper GraphQL parser
 3. **Limited Entity Support**: Currently optimized for Stream entities
 4. **Order By**: `orderBy` and `orderDirection` parameters are extracted but not used in conversion
+5. **No Block Queries**: Time-traveling queries with `block` parameters are not supported as Hyperindex doesn't natively support historical queries
+6. **Data Limit**: Unless Hyperindex is configured via environment variables to support 5000 datapoints, the `limit` parameter should be set to a maximum of 1000
 
 ### Planned Improvements
 
