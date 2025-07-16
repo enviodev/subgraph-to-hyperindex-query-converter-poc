@@ -10,6 +10,8 @@ pub enum ConversionError {
     MissingField(String),
     #[error("Unsupported filter: {0}")]
     UnsupportedFilter(String),
+    #[error("Complex _meta queries are not supported. Only _meta {{ block {{ number }} }} is currently available")]
+    ComplexMetaQuery,
 }
 
 pub fn convert_subgraph_to_hyperindex(payload: &Value) -> Result<Value, ConversionError> {
@@ -31,6 +33,11 @@ pub fn convert_subgraph_to_hyperindex(payload: &Value) -> Result<Value, Conversi
 }
 
 fn convert_query_structure(query: &str) -> Result<String, ConversionError> {
+    // Check for _meta query first
+    if query.contains("_meta") {
+        return convert_meta_query(query);
+    }
+
     // Find the entity and its parameters
     let (entity, params, selection) = extract_entity_and_params(query)?;
     let entity_cap = singularize_and_capitalize(&entity);
@@ -89,6 +96,40 @@ fn convert_query_structure(query: &str) -> Result<String, ConversionError> {
         entity_cap, limit, offset, where_param, selection
     );
     Ok(hyperindex_query)
+}
+
+fn convert_meta_query(query: &str) -> Result<String, ConversionError> {
+    // Check if it's a simple _meta { block { number } } query
+    let simple_meta_pattern = "_meta { block { number } }";
+    let complex_meta_patterns = [
+        "block { hash",
+        "block { parentHash",
+        "block { timestamp",
+        "deployment",
+        "hasIndexingErrors",
+    ];
+
+    // Check for complex patterns
+    for pattern in &complex_meta_patterns {
+        if query.contains(pattern) {
+            return Err(ConversionError::ComplexMetaQuery);
+        }
+    }
+
+    // Check if it's the simple pattern
+    if query.contains(simple_meta_pattern) {
+        return Ok(
+            "query {\n  chain_metadata {\n    latest_fetched_block_number\n  }\n}".to_string(),
+        );
+    }
+
+    // If it's a _meta query but not the simple pattern, it's complex
+    if query.contains("_meta") {
+        return Err(ConversionError::ComplexMetaQuery);
+    }
+
+    // This shouldn't happen, but just in case
+    Err(ConversionError::InvalidQueryFormat)
 }
 
 fn convert_filters_to_where_clause(
