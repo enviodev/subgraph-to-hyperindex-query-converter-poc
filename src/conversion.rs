@@ -6,8 +6,6 @@ use thiserror::Error;
 pub enum ConversionError {
     #[error("Invalid GraphQL query format")]
     InvalidQueryFormat,
-    #[error("Unsupported query structure")]
-    UnsupportedQuery,
     #[error("Missing required field: {0}")]
     MissingField(String),
     #[error("Unsupported filter: {0}")]
@@ -44,14 +42,25 @@ fn convert_query_structure(query: &str) -> Result<String, ConversionError> {
         .get("skip")
         .cloned()
         .unwrap_or_else(|| "0".to_string());
-    let order_by_field = params
+    let _order_by_field = params
         .get("orderBy")
         .cloned()
         .unwrap_or_else(|| "id".to_string());
-    let order_direction = params
+    let _order_direction = params
         .get("orderDirection")
         .cloned()
         .unwrap_or_else(|| "asc".to_string());
+
+    // Single-entity by primary key: singular entity, only 'id' param
+    if !entity.ends_with('s') && params.len() == 1 && params.contains_key("id") {
+        let pk_query = format!(
+            "query {{\n  {}_by_pk(id: {}) {}\n}}",
+            entity,
+            params.get("id").unwrap(),
+            selection
+        );
+        return Ok(pk_query);
+    }
 
     // Convert filters to where clause
     let where_clause = convert_filters_to_where_clause(&params)?;

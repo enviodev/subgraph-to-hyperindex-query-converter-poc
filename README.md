@@ -34,6 +34,7 @@ This service acts as a translation layer between TheGraph's subgraph query inter
 
 - **Stream Entity**: Automatically adds `where: {chainId: {_eq: "1"}}` clause
 - **Selection Sets**: Preserved as-is in the converted query
+- **Single Entity by Primary Key**: Singular entity queries with only an `id` parameter are converted to `entity_by_pk(id: ...)` format
 
 ### Filter Conversions
 
@@ -128,9 +129,11 @@ curl -X POST -H "Content-Type: application/json" \
   http://localhost:3000/debug
 ```
 
-## Example Query Conversion
+## Example Query Conversions
 
-### Input (Subgraph Format)
+### Collection Query
+
+#### Input (Subgraph Format)
 
 ```graphql
 query {
@@ -143,7 +146,7 @@ query {
 }
 ```
 
-### Output (Hyperindex Format)
+#### Output (Hyperindex Format)
 
 ```graphql
 query {
@@ -152,6 +155,28 @@ query {
     cliff
     cliffTime
     chainId
+  }
+}
+```
+
+### Single Entity Query
+
+#### Input (Subgraph Format)
+
+```graphql
+query {
+  post(id: "0xabc...") {
+    title
+  }
+}
+```
+
+#### Output (Hyperindex Format)
+
+```graphql
+query {
+  post_by_pk(id: "0xabc...") {
+    title
   }
 }
 ```
