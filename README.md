@@ -195,7 +195,3 @@ curl -X POST -H "Content-Type: application/json" \
   -d '{"query": "your query here"}' \
   http://localhost:3000/debug
 ```
-
-## License
-
-[Add your license here]
