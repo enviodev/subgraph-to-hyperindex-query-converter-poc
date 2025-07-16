@@ -33,7 +33,7 @@ pub fn convert_subgraph_to_hyperindex(payload: &Value) -> Result<Value, Conversi
 fn convert_query_structure(query: &str) -> Result<String, ConversionError> {
     // Find the entity and its parameters
     let (entity, params, selection) = extract_entity_and_params(query)?;
-    let entity_cap = capitalize_first(&entity);
+    let entity_cap = singularize_and_capitalize(&entity);
     let limit = params
         .get("first")
         .cloned()
@@ -50,9 +50,16 @@ fn convert_query_structure(query: &str) -> Result<String, ConversionError> {
         .get("orderDirection")
         .cloned()
         .unwrap_or_else(|| "asc".to_string());
+    // Add where clause for chainId (temporary dev note)
+    let where_clause = if entity_cap == "Stream" {
+        ", where: {chainId: {_eq: \"1\"}}"
+    } else {
+        ""
+    };
+
     let hyperindex_query = format!(
-        "query {{\n  {}(limit: {}, offset: {}, order_by: {{{}: {}}}) {}\n}}",
-        entity_cap, limit, offset, order_by_field, order_direction, selection
+        "query {{\n  {}(limit: {}, offset: {}{}) {}\n}}",
+        entity_cap, limit, offset, where_clause, selection
     );
     Ok(hyperindex_query)
 }
@@ -60,7 +67,7 @@ fn convert_query_structure(query: &str) -> Result<String, ConversionError> {
 fn extract_entity_and_params(
     query: &str,
 ) -> Result<(String, HashMap<String, String>, String), ConversionError> {
-    // Find the first entity (e.g., posts(first: 5, ...))
+    // Find the first entity (e.g., streams(first: 2, ...))
     let open_brace = query.find('{').ok_or(ConversionError::InvalidQueryFormat)?;
     let after_brace = &query[open_brace + 1..];
     let entity_start = after_brace
@@ -73,6 +80,9 @@ fn extract_entity_and_params(
     let entity = &after_entity[..entity_end];
     let mut params = HashMap::new();
     let mut selection = String::new();
+
+    // Find the parameters section
+    let mut after_params = after_entity;
     if let Some(param_start) = after_entity.find('(') {
         if let Some(param_end) = after_entity.find(')') {
             let params_str = &after_entity[param_start + 1..param_end];
@@ -84,18 +94,17 @@ fn extract_entity_and_params(
                     params.insert(key.to_string(), value.to_string());
                 }
             }
-            // The rest is the selection set
-            let selection_start = after_entity[param_end + 1..]
-                .find('{')
-                .ok_or(ConversionError::InvalidQueryFormat)?
-                + param_end
-                + 2;
-            let selection_end = query
-                .rfind('}')
-                .ok_or(ConversionError::InvalidQueryFormat)?;
-            selection = query[selection_start..selection_end].trim().to_string();
+            after_params = &after_entity[param_end + 1..];
         }
     }
+    // Find the selection set after the parameters (or directly after entity if no params)
+    if let Some(selection_start) = after_params.find('{') {
+        let selection_content = &after_params[selection_start + 1..];
+        if let Some(selection_end) = find_matching_brace(selection_content) {
+            selection = selection_content[..selection_end].trim().to_string();
+        }
+    }
+
     Ok((
         entity.to_string(),
         params,
@@ -103,8 +112,31 @@ fn extract_entity_and_params(
     ))
 }
 
-fn capitalize_first(s: &str) -> String {
-    let mut c = s.chars();
+fn find_matching_brace(content: &str) -> Option<usize> {
+    let mut brace_count = 1; // already inside one {
+    for (i, ch) in content.chars().enumerate() {
+        match ch {
+            '{' => brace_count += 1,
+            '}' => {
+                brace_count -= 1;
+                if brace_count == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn singularize_and_capitalize(s: &str) -> String {
+    // Naive singularization: remove trailing 's' if present
+    let singular = if s.ends_with('s') && s.len() > 1 {
+        &s[..s.len() - 1]
+    } else {
+        s
+    };
+    let mut c = singular.chars();
     match c.next() {
         None => String::new(),
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
