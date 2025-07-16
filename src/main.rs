@@ -1,4 +1,5 @@
 use axum::{extract::Json, http::StatusCode, response::IntoResponse, routing::post, Router};
+use dotenv;
 use reqwest;
 use serde_json::Value;
 use std::net::SocketAddr;
@@ -10,6 +11,9 @@ mod conversion;
 
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file
+    dotenv::dotenv().ok();
+
     tracing_subscriber::fmt::init();
 
     let app = Router::new()
@@ -66,9 +70,12 @@ async fn handle_debug(Json(payload): Json<Value>) -> impl IntoResponse {
 }
 
 async fn forward_to_hyperindex(query: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    let hyperindex_url = std::env::var("HYPERINDEX_URL")
+        .unwrap_or_else(|_| "https://indexer.hyperindex.xyz/53b7e25/v1/graphql".to_string());
+
     let client = reqwest::Client::new();
     let response = client
-        .post("https://indexer.hyperindex.xyz/53b7e25/v1/graphql")
+        .post(&hyperindex_url)
         .header("Content-Type", "application/json")
         .json(query)
         .send()
