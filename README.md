@@ -35,6 +35,36 @@ This service acts as a translation layer between TheGraph's subgraph query inter
 - **Stream Entity**: Automatically adds `where: {chainId: {_eq: "1"}}` clause
 - **Selection Sets**: Preserved as-is in the converted query
 
+### Filter Conversions
+
+The following table shows how TheGraph filter syntax is converted to Hasura equivalents:
+
+| The Graph Filter               | Hasura Equivalent                      | Description                          | Example (The Graph)                  | Example (Hasura)                        |
+| ------------------------------ | -------------------------------------- | ------------------------------------ | ------------------------------------ | --------------------------------------- |
+| `field`                        | `field: { _eq: val }`                  | Equal                                | `name: "Alice"`                      | `name: { _eq: "Alice" }`                |
+| `field_not`                    | `field: { _neq: val }`                 | Not equal                            | `id_not: "0x123"`                    | `id: { _neq: "0x123" }`                 |
+| `field_gt`                     | `field: { _gt: val }`                  | Greater than                         | `value_gt: 100`                      | `value: { _gt: 100 }`                   |
+| `field_gte`                    | `field: { _gte: val }`                 | Greater than or equal                | `value_gte: 100`                     | `value: { _gte: 100 }`                  |
+| `field_lt`                     | `field: { _lt: val }`                  | Less than                            | `timestamp_lt: 1650000000`           | `timestamp: { _lt: 1650000000 }`        |
+| `field_lte`                    | `field: { _lte: val }`                 | Less than or equal                   | `timestamp_lte: 1650000000`          | `timestamp: { _lte: 1650000000 }`       |
+| `field_in`                     | `field: { _in: [...] }`                | Matches any in array                 | `status_in: ["OPEN", "CLOSED"]`      | `status: { _in: ["OPEN", "CLOSED"] }`   |
+| `field_not_in`                 | `field: { _nin: [...] }`               | Excludes values in array             | `id_not_in: ["0x1", "0x2"]`          | `id: { _nin: ["0x1", "0x2"] }`          |
+| `field_contains`               | `field: { _ilike: "%val%" }`           | Substring match (case-insensitive)   | `name_contains: "graph"`             | `name: { _ilike: "%graph%" }`           |
+| `field_not_contains`           | `field: { _not: { _ilike: "%val%" } }` | Substring mismatch                   | `name_not_contains: "graph"`         | `name: { _not: { _ilike: "%graph%" } }` |
+| `field_starts_with`            | `field: { _ilike: "val%" }`            | Starts with                          | `symbol_starts_with: "ETH"`          | `symbol: { _ilike: "ETH%" }`            |
+| `field_ends_with`              | `field: { _ilike: "%val" }`            | Ends with                            | `symbol_ends_with: "USD"`            | `symbol: { _ilike: "%USD" }`            |
+| `field_not_starts_with`        | `field: { _not: { _ilike: "val%" } }`  | Doesn't start with                   | `name_not_starts_with: "A"`          | `name: { _not: { _ilike: "A%" } }`      |
+| `field_not_ends_with`          | `field: { _not: { _ilike: "%val" } }`  | Doesn't end with                     | `name_not_ends_with: "x"`            | `name: { _not: { _ilike: "%x" } }`      |
+| `field_contains_nocase`        | `field: { _ilike: "%val%" }`           | Substring match, case-insensitive    | `name_contains_nocase: "alice"`      | `name: { _ilike: "%alice%" }`           |
+| `field_not_contains_nocase`    | `field: { _not: { _ilike: "%val%" } }` | Substring mismatch, case-insensitive | `name_not_contains_nocase: "alice"`  | `name: { _not: { _ilike: "%alice%" } }` |
+| `field_starts_with_nocase`     | `field: { _ilike: "val%" }`            | Case-insensitive prefix match        | `id_starts_with_nocase: "0xabc"`     | `id: { _ilike: "0xabc%" }`              |
+| `field_ends_with_nocase`       | `field: { _ilike: "%val" }`            | Case-insensitive suffix match        | `id_ends_with_nocase: "def"`         | `id: { _ilike: "%def" }`                |
+| `field_not_starts_with_nocase` | `field: { _not: { _ilike: "val%" } }`  | Case-insensitive negated prefix      | `name_not_starts_with_nocase: "foo"` | `name: { _not: { _ilike: "foo%" } }`    |
+| `field_not_ends_with_nocase`   | `field: { _not: { _ilike: "%val" } }`  | Case-insensitive negated suffix      | `name_not_ends_with_nocase: "bar"`   | `name: { _not: { _ilike: "%bar" } }`    |
+| `field_containsAny`            | ❌ No direct equivalent                | Array overlap (string[] fields)      | `tags_containsAny: ["foo", "bar"]`   | ❌ Requires custom SQL                  |
+| `field_containsAll`            | ❌ No direct equivalent                | Field contains all values            | `tags_containsAll: ["foo", "bar"]`   | ❌                                      |
+| `id (top-level)`               | `entity_by_pk(id: ...)`                | Get by primary key                   | `user(id: "0x123")`                  | `user_by_pk(id: "0x123")`               |
+
 ## Setup
 
 ### Prerequisites

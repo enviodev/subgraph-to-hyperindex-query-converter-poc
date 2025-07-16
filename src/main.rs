@@ -64,9 +64,22 @@ async fn handle_query(Json(payload): Json<Value>) -> impl IntoResponse {
 
 async fn handle_debug(Json(payload): Json<Value>) -> impl IntoResponse {
     tracing::info!("Received debug query: {:?}", payload);
-    let converted_query = conversion::convert_subgraph_to_hyperindex(&payload).unwrap();
-    tracing::info!("Converted debug query: {:?}", converted_query);
-    (StatusCode::OK, Json(converted_query))
+
+    match conversion::convert_subgraph_to_hyperindex(&payload) {
+        Ok(converted_query) => {
+            tracing::info!("Converted debug query: {:?}", converted_query);
+            (StatusCode::OK, Json(converted_query))
+        }
+        Err(e) => {
+            tracing::error!("Debug conversion error: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": e.to_string()
+                })),
+            )
+        }
+    }
 }
 
 async fn forward_to_hyperindex(query: &Value) -> Result<Value, Box<dyn std::error::Error>> {

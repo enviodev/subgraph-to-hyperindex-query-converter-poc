@@ -10,6 +10,8 @@ pub enum ConversionError {
     UnsupportedQuery,
     #[error("Missing required field: {0}")]
     MissingField(String),
+    #[error("Unsupported filter: {0}")]
+    UnsupportedFilter(String),
 }
 
 pub fn convert_subgraph_to_hyperindex(payload: &Value) -> Result<Value, ConversionError> {
@@ -50,18 +52,205 @@ fn convert_query_structure(query: &str) -> Result<String, ConversionError> {
         .get("orderDirection")
         .cloned()
         .unwrap_or_else(|| "asc".to_string());
-    // Add where clause for chainId (temporary dev note)
-    let where_clause = if entity_cap == "Stream" {
-        ", where: {chainId: {_eq: \"1\"}}"
+
+    // Convert filters to where clause
+    let where_clause = convert_filters_to_where_clause(&params)?;
+
+    // Add hardcoded where clause for Stream entity (temporary)
+    let final_where_clause = if entity_cap == "Stream" {
+        if where_clause.is_empty() {
+            "where: {chainId: {_eq: \"1\"}}".to_string()
+        } else {
+            format!("where: {{chainId: {{_eq: \"1\"}}, {}}}", where_clause)
+        }
+    } else if !where_clause.is_empty() {
+        format!("where: {{{}}}", where_clause)
     } else {
-        ""
+        String::new()
+    };
+
+    let where_param = if final_where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", final_where_clause)
     };
 
     let hyperindex_query = format!(
         "query {{\n  {}(limit: {}, offset: {}{}) {}\n}}",
-        entity_cap, limit, offset, where_clause, selection
+        entity_cap, limit, offset, where_param, selection
     );
     Ok(hyperindex_query)
+}
+
+fn convert_filters_to_where_clause(
+    params: &HashMap<String, String>,
+) -> Result<String, ConversionError> {
+    let mut where_conditions = Vec::new();
+
+    for (key, value) in params {
+        if key == "first" || key == "skip" || key == "orderBy" || key == "orderDirection" {
+            continue; // Skip pagination and ordering parameters
+        }
+
+        let condition = convert_filter_to_hasura_condition(key, value)?;
+        where_conditions.push(condition);
+    }
+
+    Ok(where_conditions.join(", "))
+}
+
+fn convert_filter_to_hasura_condition(key: &str, value: &str) -> Result<String, ConversionError> {
+    // Handle different filter patterns
+    if key.ends_with("_not") {
+        let field = &key[..key.len() - 4];
+        return Ok(format!("{}: {{_neq: {}}}", field, value));
+    }
+
+    if key.ends_with("_gt") {
+        let field = &key[..key.len() - 3];
+        return Ok(format!("{}: {{_gt: {}}}", field, value));
+    }
+
+    if key.ends_with("_gte") {
+        let field = &key[..key.len() - 4];
+        return Ok(format!("{}: {{_gte: {}}}", field, value));
+    }
+
+    if key.ends_with("_lt") {
+        let field = &key[..key.len() - 3];
+        return Ok(format!("{}: {{_lt: {}}}", field, value));
+    }
+
+    if key.ends_with("_lte") {
+        let field = &key[..key.len() - 4];
+        return Ok(format!("{}: {{_lte: {}}}", field, value));
+    }
+
+    if key.ends_with("_in") {
+        let field = &key[..key.len() - 3];
+        return Ok(format!("{}: {{_in: {}}}", field, value));
+    }
+
+    if key.ends_with("_not_in") {
+        let field = &key[..key.len() - 7];
+        return Ok(format!("{}: {{_nin: {}}}", field, value));
+    }
+
+    if key.ends_with("_contains") {
+        let field = &key[..key.len() - 9];
+        return Ok(format!(
+            "{}: {{_ilike: \"%{}%\"}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_not_contains") {
+        let field = &key[..key.len() - 13];
+        return Ok(format!(
+            "{}: {{_not: {{_ilike: \"%{}%\"}}}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_starts_with") {
+        let field = &key[..key.len() - 12];
+        return Ok(format!(
+            "{}: {{_ilike: \"{}%\"}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_ends_with") {
+        let field = &key[..key.len() - 10];
+        return Ok(format!(
+            "{}: {{_ilike: \"%{}\"}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_not_starts_with") {
+        let field = &key[..key.len() - 16];
+        return Ok(format!(
+            "{}: {{_not: {{_ilike: \"{}%\"}}}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_not_ends_with") {
+        let field = &key[..key.len() - 14];
+        return Ok(format!(
+            "{}: {{_not: {{_ilike: \"%{}\"}}}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_contains_nocase") {
+        let field = &key[..key.len() - 15];
+        return Ok(format!(
+            "{}: {{_ilike: \"%{}%\"}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_not_contains_nocase") {
+        let field = &key[..key.len() - 19];
+        return Ok(format!(
+            "{}: {{_not: {{_ilike: \"%{}%\"}}}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_starts_with_nocase") {
+        let field = &key[..key.len() - 18];
+        return Ok(format!(
+            "{}: {{_ilike: \"{}%\"}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_ends_with_nocase") {
+        let field = &key[..key.len() - 16];
+        return Ok(format!(
+            "{}: {{_ilike: \"%{}\"}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_not_starts_with_nocase") {
+        let field = &key[..key.len() - 22];
+        return Ok(format!(
+            "{}: {{_not: {{_ilike: \"{}%\"}}}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    if key.ends_with("_not_ends_with_nocase") {
+        let field = &key[..key.len() - 20];
+        return Ok(format!(
+            "{}: {{_not: {{_ilike: \"%{}\"}}}}",
+            field,
+            value.trim_matches('"')
+        ));
+    }
+
+    // Handle unsupported filters
+    if key.ends_with("_containsAny") || key.ends_with("_containsAll") {
+        return Err(ConversionError::UnsupportedFilter(key.to_string()));
+    }
+
+    // Default case: treat as equality filter
+    Ok(format!("{}: {{_eq: {}}}", key, value))
 }
 
 fn extract_entity_and_params(
