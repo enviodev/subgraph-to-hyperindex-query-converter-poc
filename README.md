@@ -1,18 +1,49 @@
 # Subgraph to Hyperindex Query Converter
 
-A Rust service that converts TheGraph subgraph GraphQL queries to Hyperindex/Hasura GraphQL format and forwards them to a Hyperindex endpoint.
-
-## Overview
-
-This service acts as a translation layer between TheGraph's subgraph query interface and Hyperindex's Hasura-based GraphQL API. It accepts subgraph-style queries, converts them to the appropriate Hyperindex format, forwards them to the configured endpoint, and returns the live response.
+A standalone rust service intended to run alongside your hyperindex instance that converts TheGraph subgraph GraphQL queries to Hyperindex/Hasura GraphQL format and forwards them to a Hyperindex endpoint. The tool also converts the responses into the same response format as returned by TheGraph subgraphs. This is useful for automatically porting existing ui's or clients to reading from HyperIndex.
 
 ## Features
 
 - **Query Conversion**: Converts subgraph GraphQL syntax to Hyperindex format
 - **HTTP Forwarding**: Forwards converted queries to Hyperindex endpoints
-- **Environment Configuration**: Configurable endpoints via environment variables
+- **Environment Configuration**: Configurable endpoints & schema's via environment variables
 - **Error Handling**: Comprehensive error handling and logging
 - **Debug Endpoint**: Optional debug endpoint to inspect query conversion
+- **Chain-Specific Queries**: Support for chain-specific queries via `/chainId/{chain_id}` endpoint
+
+## API Endpoints
+
+### Main Endpoint (`/`)
+
+Converts and forwards queries to Hyperindex without adding any chain-specific filters.
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"query": "query { streams(first: 2, skip: 10) { category cliff cliffTime chainId } }"}' \
+  http://localhost:3000/
+```
+
+### Chain-Specific Endpoint (`/chainId/{chain_id}`)
+
+Converts and forwards queries to Hyperindex, automatically adding a `chainId` filter to the where clause.
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"query": "query { streams(first: 2, skip: 10) { category cliff cliffTime chainId } }"}' \
+  http://localhost:3000/chainId/5
+```
+
+This will add `where: {chainId: {_eq: "5"}}` to the converted query.
+
+### Debug Endpoint (`/debug`)
+
+Returns the converted query without forwarding to Hyperindex.
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"query": "query { streams(first: 2, skip: 10) { category cliff cliffTime chainId } }"}' \
+  http://localhost:3000/debug
+```
 
 ## Current Conversion Rules
 
@@ -30,9 +61,14 @@ This service acts as a translation layer between TheGraph's subgraph query inter
 | `orderBy`          | `order_by`           | Field to sort by (currently unused) |
 | `orderDirection`   | `order_by` direction | Sort direction (currently unused)   |
 
+### Chain ID Handling
+
+- **Default endpoints (`/` and `/debug`)**: No `chainId` filter is added
+- **Chain-specific endpoint (`/chainId/{chain_id}`)**: Automatically adds `where: {chainId: {_eq: "{chain_id}"}}` to the query
+- **Single Entity by Primary Key**: Singular entity queries with only an `id` parameter are converted to `entity_by_pk(id: ...)` format (no chainId filter)
+
 ### Special Handling
 
-- **Stream Entity**: Automatically adds `where: {chainId: {_eq: "1"}}` clause
 - **Selection Sets**: Preserved as-is in the converted query
 - **Single Entity by Primary Key**: Singular entity queries with only an `id` parameter are converted to `entity_by_pk(id: ...)` format
 
@@ -111,12 +147,22 @@ HYPERINDEX_URL=https://indexer.hyperindex.xyz/53b7e25/v1/graphql
 
 ### Main Endpoint
 
-POST requests to `/` will convert and forward queries to Hyperindex:
+POST requests to `/` will convert and forward queries to Hyperindex without adding chain-specific filters:
 
 ```bash
 curl -X POST -H "Content-Type: application/json" \
   -d '{"query": "query { streams(first: 2, skip: 10) { category cliff cliffTime chainId } }"}' \
   http://localhost:3000/
+```
+
+### Chain-Specific Endpoint
+
+POST requests to `/chainId/{chain_id}` will convert and forward queries to Hyperindex, automatically adding a `chainId` filter:
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"query": "query { streams(first: 2, skip: 10) { category cliff cliffTime chainId } }"}' \
+  http://localhost:3000/chainId/5
 ```
 
 ### Debug Endpoint
@@ -131,7 +177,7 @@ curl -X POST -H "Content-Type: application/json" \
 
 ## Example Query Conversions
 
-### Collection Query
+### Collection Query (Default Endpoint)
 
 #### Input (Subgraph Format)
 
@@ -150,7 +196,35 @@ query {
 
 ```graphql
 query {
-  Stream(limit: 2, offset: 10, where: { chainId: { _eq: "1" } }) {
+  Stream(limit: 2, offset: 10) {
+    category
+    cliff
+    cliffTime
+    chainId
+  }
+}
+```
+
+### Collection Query (Chain-Specific Endpoint)
+
+#### Input (Subgraph Format)
+
+```graphql
+query {
+  streams(first: 2, skip: 10) {
+    category
+    cliff
+    cliffTime
+    chainId
+  }
+}
+```
+
+#### Output (Hyperindex Format) - via `/chainId/5`
+
+```graphql
+query {
+  Stream(limit: 2, offset: 10, where: { chainId: { _eq: "5" } }) {
     category
     cliff
     cliffTime
@@ -208,18 +282,17 @@ query {
 
 ### Known Issues
 
-1. **Hardcoded Where Clause**: The `where: {chainId: {_eq: "1"}}` clause is currently hardcoded for Stream entities
-2. **Basic Parsing**: Uses simple string parsing instead of a proper GraphQL parser
-3. **Limited Entity Support**: Currently optimized for Stream entities
-4. **Order By**: `orderBy` and `orderDirection` parameters are extracted but not used in conversion
-5. **No Block Queries**: Time-traveling queries with `block` parameters are not supported as Hyperindex doesn't natively support historical queries
-6. **Data Limit**: Unless Hyperindex is configured via environment variables to support 5000 datapoints, the `limit` parameter should be set to a maximum of 1000
+1. **Basic Parsing**: Uses simple string parsing instead of a proper GraphQL parser
+2. **Limited Entity Support**: Currently optimized for Stream entities
+3. **Order By**: `orderBy` and `orderDirection` parameters are extracted but not used in conversion
+4. **No Block Queries**: Time-traveling queries with `block` parameters are not supported as Hyperindex doesn't natively support historical queries
+5. **Data Limit**: Unless Hyperindex is configured via environment variables to support 5000 datapoints, the `limit` parameter should be set to a maximum of 1000
+6. **\_meta Queries**: Meta queries are limitted only to latest block number
 
 ### Planned Improvements
 
 - [ ] Use proper GraphQL parser for robust query handling
-- [ ] Make where clauses configurable per entity
-- [ ] Support for nested queries and fragments
+
 - [ ] Add support for variables and directives
 - [ ] Implement proper order_by conversion
 - [ ] Add comprehensive test coverage
@@ -248,9 +321,7 @@ cargo check
 RUST_LOG=debug cargo run
 
 # Test conversion only
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"query": "your query here"}' \
-  http://localhost:3000/debug
+cargo test
 ```
 
 ## License
