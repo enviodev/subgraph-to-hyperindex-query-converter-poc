@@ -2,6 +2,8 @@
 
 A standalone rust service intended to run alongside your hyperindex instance that converts TheGraph subgraph GraphQL queries to Hyperindex/Hasura GraphQL format and forwards them to a Hyperindex endpoint. The tool also converts the responses into the same response format as returned by TheGraph subgraphs. This is useful for automatically porting existing ui's or clients to reading from HyperIndex.
 
+The tool is under active development and is not yet ready for production use. It is currently in a proof-of-concept stage and may not work as expected. It will likely never be a perfect map for all use cases however likely to work for most use cases.
+
 ## Features
 
 - **Query Conversion**: Converts subgraph GraphQL syntax to Hyperindex format
