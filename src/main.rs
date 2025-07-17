@@ -1,4 +1,10 @@
-use axum::{extract::Json, http::StatusCode, response::IntoResponse, routing::post, Router};
+use axum::{
+    extract::{Json, Path},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::post,
+    Router,
+};
 use dotenv;
 use reqwest;
 use serde_json::Value;
@@ -18,7 +24,8 @@ async fn main() {
 
     let app = Router::new()
         .route("/", post(handle_query))
-        .route("/debug", post(handle_debug));
+        .route("/debug", post(handle_debug))
+        .route("/chainId/:chain_id", post(handle_chain_query));
 
     let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
     tracing::info!("listening on {}", addr);
@@ -29,9 +36,52 @@ async fn main() {
 async fn handle_query(Json(payload): Json<Value>) -> impl IntoResponse {
     tracing::info!("Received query: {:?}", payload);
 
-    match conversion::convert_subgraph_to_hyperindex(&payload) {
+    match conversion::convert_subgraph_to_hyperindex(&payload, None) {
         Ok(converted_query) => {
             tracing::info!("Converted query: {:?}", converted_query);
+
+            // Forward the converted query to Hyperindex
+            match forward_to_hyperindex(&converted_query).await {
+                Ok(response) => {
+                    tracing::info!("Hyperindex response: {:?}", response);
+                    (StatusCode::OK, Json(response))
+                }
+                Err(e) => {
+                    tracing::error!("Hyperindex request error: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!("Hyperindex request failed: {}", e)
+                        })),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("Conversion error: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": e.to_string()
+                })),
+            )
+        }
+    }
+}
+
+async fn handle_chain_query(
+    Path(chain_id): Path<String>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    tracing::info!(
+        "Received chain query for chain_id: {}, payload: {:?}",
+        chain_id,
+        payload
+    );
+
+    match conversion::convert_subgraph_to_hyperindex(&payload, Some(&chain_id)) {
+        Ok(converted_query) => {
+            tracing::info!("Converted chain query: {:?}", converted_query);
 
             // Forward the converted query to Hyperindex
             match forward_to_hyperindex(&converted_query).await {
@@ -65,7 +115,7 @@ async fn handle_query(Json(payload): Json<Value>) -> impl IntoResponse {
 async fn handle_debug(Json(payload): Json<Value>) -> impl IntoResponse {
     tracing::info!("Received debug query: {:?}", payload);
 
-    match conversion::convert_subgraph_to_hyperindex(&payload) {
+    match conversion::convert_subgraph_to_hyperindex(&payload, None) {
         Ok(converted_query) => {
             tracing::info!("Converted debug query: {:?}", converted_query);
             (StatusCode::OK, Json(converted_query))

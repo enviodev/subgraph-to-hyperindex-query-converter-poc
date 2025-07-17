@@ -14,7 +14,10 @@ pub enum ConversionError {
     ComplexMetaQuery,
 }
 
-pub fn convert_subgraph_to_hyperindex(payload: &Value) -> Result<Value, ConversionError> {
+pub fn convert_subgraph_to_hyperindex(
+    payload: &Value,
+    chain_id: Option<&str>,
+) -> Result<Value, ConversionError> {
     // Extract the query from the payload
     let query = payload
         .get("query")
@@ -25,14 +28,14 @@ pub fn convert_subgraph_to_hyperindex(payload: &Value) -> Result<Value, Conversi
     tracing::info!("Converting query: {}", query);
 
     // Parse the GraphQL query (simplified parsing for now)
-    let converted_query = convert_query_structure(query)?;
+    let converted_query = convert_query_structure(query, chain_id)?;
 
     Ok(serde_json::json!({
         "query": converted_query
     }))
 }
 
-fn convert_query_structure(query: &str) -> Result<String, ConversionError> {
+fn convert_query_structure(query: &str, chain_id: Option<&str>) -> Result<String, ConversionError> {
     // Check for _meta query first
     if query.contains("_meta") {
         return convert_meta_query(query);
@@ -66,12 +69,15 @@ fn convert_query_structure(query: &str) -> Result<String, ConversionError> {
     // Convert filters to where clause
     let where_clause = convert_filters_to_where_clause(&params)?;
 
-    // Add hardcoded where clause for Stream entity (temporary)
-    let final_where_clause = if entity_cap == "Stream" {
+    // Add chainId where clause only if chain_id is provided
+    let final_where_clause = if let Some(chain_id) = chain_id {
         if where_clause.is_empty() {
-            "where: {chainId: {_eq: \"1\"}}".to_string()
+            format!("where: {{chainId: {{_eq: \"{}\"}}}}", chain_id)
         } else {
-            format!("where: {{chainId: {{_eq: \"1\"}}, {}}}", where_clause)
+            format!(
+                "where: {{chainId: {{_eq: \"{}\"}}, {}}}",
+                chain_id, where_clause
+            )
         }
     } else if !where_clause.is_empty() {
         format!("where: {{{}}}", where_clause)
@@ -477,7 +483,7 @@ mod tests {
     #[test]
     fn test_basic_collection_query() {
         let payload = create_test_payload("query { streams(first: 10, skip: 0) { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(limit: 10, offset: 0, where: {chainId: {_eq: \"1\"}}) {\n    id name\n  }\n}"
         });
@@ -487,7 +493,7 @@ mod tests {
     #[test]
     fn test_single_entity_query() {
         let payload = create_test_payload("query { stream(id: \"123\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  stream_by_pk(id: \"123\") {\n    id name\n  }\n}"
         });
@@ -497,7 +503,7 @@ mod tests {
     #[test]
     fn test_meta_query_simple() {
         let payload = create_test_payload("query { _meta { block { number } } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  chain_metadata {\n    latest_fetched_block_number\n  }\n}"
         });
@@ -507,7 +513,7 @@ mod tests {
     #[test]
     fn test_meta_query_complex() {
         let payload = create_test_payload("query { _meta { block { hash number } } }");
-        let result = convert_subgraph_to_hyperindex(&payload);
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1"));
         assert!(result.is_err());
         match result {
             Err(ConversionError::ComplexMetaQuery) => {}
@@ -519,7 +525,7 @@ mod tests {
     #[test]
     fn test_equality_filter() {
         let payload = create_test_payload("query { streams(name: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_eq: \"test\"}}) {\n    id name\n  }\n}"
         });
@@ -529,7 +535,7 @@ mod tests {
     #[test]
     fn test_not_filter() {
         let payload = create_test_payload("query { streams(name_not: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_neq: \"test\"}}) {\n    id name\n  }\n}"
         });
@@ -539,7 +545,7 @@ mod tests {
     #[test]
     fn test_greater_than_filter() {
         let payload = create_test_payload("query { streams(amount_gt: 100) { id amount } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, amount: {_gt: 100}}) {\n    id amount\n  }\n}"
         });
@@ -549,7 +555,7 @@ mod tests {
     #[test]
     fn test_greater_than_or_equal_filter() {
         let payload = create_test_payload("query { streams(amount_gte: 100) { id amount } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, amount: {_gte: 100}}) {\n    id amount\n  }\n}"
         });
@@ -559,7 +565,7 @@ mod tests {
     #[test]
     fn test_less_than_filter() {
         let payload = create_test_payload("query { streams(amount_lt: 100) { id amount } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, amount: {_lt: 100}}) {\n    id amount\n  }\n}"
         });
@@ -569,7 +575,7 @@ mod tests {
     #[test]
     fn test_less_than_or_equal_filter() {
         let payload = create_test_payload("query { streams(amount_lte: 100) { id amount } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, amount: {_lte: 100}}) {\n    id amount\n  }\n}"
         });
@@ -580,7 +586,7 @@ mod tests {
     fn test_in_filter() {
         let payload =
             create_test_payload("query { streams(id_in: [\"1\", \"2\", \"3\"]) { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, id: {_in: [\"1\", \"2\", \"3\"]}}) {\n    id name\n  }\n}"
         });
@@ -591,7 +597,7 @@ mod tests {
     fn test_not_in_filter() {
         let payload =
             create_test_payload("query { streams(id_not_in: [\"1\", \"2\", \"3\"]) { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, id: {_nin: [\"1\", \"2\", \"3\"]}}) {\n    id name\n  }\n}"
         });
@@ -601,7 +607,7 @@ mod tests {
     #[test]
     fn test_contains_filter() {
         let payload = create_test_payload("query { streams(name_contains: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_ilike: \"%test%\"}}) {\n    id name\n  }\n}"
         });
@@ -612,7 +618,7 @@ mod tests {
     fn test_not_contains_filter() {
         let payload =
             create_test_payload("query { streams(name_not_contains: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_not: {_ilike: \"%test%\"}}}) {\n    id name\n  }\n}"
         });
@@ -623,7 +629,7 @@ mod tests {
     fn test_starts_with_filter() {
         let payload =
             create_test_payload("query { streams(name_starts_with: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_ilike: \"test%\"}}) {\n    id name\n  }\n}"
         });
@@ -634,7 +640,7 @@ mod tests {
     fn test_ends_with_filter() {
         let payload =
             create_test_payload("query { streams(name_ends_with: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_ilike: \"%test\"}}) {\n    id name\n  }\n}"
         });
@@ -645,7 +651,7 @@ mod tests {
     fn test_not_starts_with_filter() {
         let payload =
             create_test_payload("query { streams(name_not_starts_with: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_not: {_ilike: \"test%\"}}}) {\n    id name\n  }\n}"
         });
@@ -656,7 +662,7 @@ mod tests {
     fn test_not_ends_with_filter() {
         let payload =
             create_test_payload("query { streams(name_not_ends_with: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_not: {_ilike: \"%test\"}}}) {\n    id name\n  }\n}"
         });
@@ -667,7 +673,7 @@ mod tests {
     fn test_contains_nocase_filter() {
         let payload =
             create_test_payload("query { streams(name_contains_nocase: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_ilike: \"%test%\"}}) {\n    id name\n  }\n}"
         });
@@ -679,7 +685,7 @@ mod tests {
         let payload = create_test_payload(
             "query { streams(name_not_contains_nocase: \"test\") { id name } }",
         );
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_not: {_ilike: \"%test%\"}}}) {\n    id name\n  }\n}"
         });
@@ -690,7 +696,7 @@ mod tests {
     fn test_starts_with_nocase_filter() {
         let payload =
             create_test_payload("query { streams(name_starts_with_nocase: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_ilike: \"test%\"}}) {\n    id name\n  }\n}"
         });
@@ -701,7 +707,7 @@ mod tests {
     fn test_ends_with_nocase_filter() {
         let payload =
             create_test_payload("query { streams(name_ends_with_nocase: \"test\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_ilike: \"%test\"}}) {\n    id name\n  }\n}"
         });
@@ -713,7 +719,7 @@ mod tests {
         let payload = create_test_payload(
             "query { streams(name_not_starts_with_nocase: \"test\") { id name } }",
         );
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_not: {_ilike: \"test%\"}}}) {\n    id name\n  }\n}"
         });
@@ -725,7 +731,7 @@ mod tests {
         let payload = create_test_payload(
             "query { streams(name_not_ends_with_nocase: \"test\") { id name } }",
         );
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_not: {_ilike: \"%test\"}}}) {\n    id name\n  }\n}"
         });
@@ -737,7 +743,7 @@ mod tests {
         let payload = create_test_payload(
             "query { streams(tags_containsAny: [\"tag1\", \"tag2\"]) { id name } }",
         );
-        let result = convert_subgraph_to_hyperindex(&payload);
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1"));
         assert!(result.is_err());
         match result {
             Err(ConversionError::UnsupportedFilter(filter)) => {
@@ -752,7 +758,7 @@ mod tests {
         let payload = create_test_payload(
             "query { streams(tags_containsAll: [\"tag1\", \"tag2\"]) { id name } }",
         );
-        let result = convert_subgraph_to_hyperindex(&payload);
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1"));
         assert!(result.is_err());
         match result {
             Err(ConversionError::UnsupportedFilter(filter)) => {
@@ -767,7 +773,7 @@ mod tests {
         let payload = create_test_payload(
             "query { streams(name_contains: \"test\", amount_gt: 100, status: \"active\") { id name amount status } }"
         );
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let query = result["query"].as_str().unwrap();
         // Check for all filter fragments regardless of order
         assert!(query.contains("chainId: {_eq: \"1\"}"));
@@ -783,9 +789,9 @@ mod tests {
     #[test]
     fn test_non_stream_entity() {
         let payload = create_test_payload("query { users(name_contains: \"john\") { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  User(where: {name: {_ilike: \"%john%\"}}) {\n    id name\n  }\n}"
+            "query": "query {\n  User(where: {chainId: {_eq: \"1\"}, name: {_ilike: \"%john%\"}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
@@ -793,7 +799,7 @@ mod tests {
     #[test]
     fn test_pagination_parameters() {
         let payload = create_test_payload("query { streams(first: 5, skip: 10) { id name } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(limit: 5, offset: 10, where: {chainId: {_eq: \"1\"}}) {\n    id name\n  }\n}"
         });
@@ -805,7 +811,7 @@ mod tests {
         let payload = create_test_payload(
             "query { streams(orderBy: name, orderDirection: desc) { id name } }",
         );
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}}) {\n    id name\n  }\n}"
         });
@@ -816,7 +822,7 @@ mod tests {
     fn test_complex_selection_set() {
         let payload =
             create_test_payload("query { streams { id name amount status { id name } } }");
-        let result = convert_subgraph_to_hyperindex(&payload).unwrap();
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
             "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}}) {\n    id name amount status { id name }\n  }\n}"
         });
@@ -826,7 +832,7 @@ mod tests {
     #[test]
     fn test_missing_query_field() {
         let payload = json!({});
-        let result = convert_subgraph_to_hyperindex(&payload);
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1"));
         assert!(result.is_err());
         match result {
             Err(ConversionError::MissingField(field)) => {
@@ -841,7 +847,7 @@ mod tests {
         let payload = json!({
             "query": 123
         });
-        let result = convert_subgraph_to_hyperindex(&payload);
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1"));
         assert!(result.is_err());
         match result {
             Err(ConversionError::InvalidQueryFormat) => {}
@@ -855,5 +861,55 @@ mod tests {
         assert_eq!(singularize_and_capitalize("users"), "User");
         assert_eq!(singularize_and_capitalize("stream"), "Stream");
         assert_eq!(singularize_and_capitalize("user"), "User");
+    }
+
+    #[test]
+    fn test_basic_collection_query_no_chain_id() {
+        let payload = create_test_payload("query { streams(first: 10, skip: 0) { id name } }");
+        let result = convert_subgraph_to_hyperindex(&payload, None).unwrap();
+        let expected = json!({
+            "query": "query {\n  Stream(limit: 10, offset: 0) {\n    id name\n  }\n}"
+        });
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_single_entity_query_no_chain_id() {
+        let payload = create_test_payload("query { stream(id: \"123\") { id name } }");
+        let result = convert_subgraph_to_hyperindex(&payload, None).unwrap();
+        let expected = json!({
+            "query": "query {\n  stream_by_pk(id: \"123\") {\n    id name\n  }\n}"
+        });
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_equality_filter_no_chain_id() {
+        let payload = create_test_payload("query { streams(name: \"test\") { id name } }");
+        let result = convert_subgraph_to_hyperindex(&payload, None).unwrap();
+        let expected = json!({
+            "query": "query {\n  Stream(where: {name: {_eq: \"test\"}}) {\n    id name\n  }\n}"
+        });
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_non_stream_entity_no_chain_id() {
+        let payload = create_test_payload("query { users(name_contains: \"john\") { id name } }");
+        let result = convert_subgraph_to_hyperindex(&payload, None).unwrap();
+        let expected = json!({
+            "query": "query {\n  User(where: {name: {_ilike: \"%john%\"}}) {\n    id name\n  }\n}"
+        });
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_different_chain_id() {
+        let payload = create_test_payload("query { streams(name: \"test\") { id name } }");
+        let result = convert_subgraph_to_hyperindex(&payload, Some("5")).unwrap();
+        let expected = json!({
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"5\"}, name: {_eq: \"test\"}}) {\n    id name\n  }\n}"
+        });
+        assert_eq!(result, expected);
     }
 }
