@@ -14,6 +14,8 @@ use tracing;
 use tracing_subscriber;
 
 mod conversion;
+#[cfg(test)]
+mod integration_tests;
 
 #[tokio::main]
 async fn main() {

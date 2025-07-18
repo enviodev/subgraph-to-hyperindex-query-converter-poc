@@ -1,0 +1,8 @@
+query {
+  Stream(offset: 10, where: {chainId: {_eq: "1"}, alias: {_ilike: "%113%"}}) {
+    alias
+    asset {
+      address
+    }
+  }
+}

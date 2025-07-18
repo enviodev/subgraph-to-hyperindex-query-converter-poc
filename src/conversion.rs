@@ -42,7 +42,7 @@ fn convert_query_structure(query: &str, chain_id: Option<&str>) -> Result<String
     }
 
     // Find the entity and its parameters
-    let (entity, params, selection) = extract_entity_and_params(query)?;
+    let (entity, mut params, selection) = extract_entity_and_params(query)?;
     let entity_cap = singularize_and_capitalize(&entity);
     let limit = params.get("first").cloned();
     let offset = params.get("skip").cloned();
@@ -66,24 +66,13 @@ fn convert_query_structure(query: &str, chain_id: Option<&str>) -> Result<String
         return Ok(pk_query);
     }
 
-    // Convert filters to where clause
-    let where_clause = convert_filters_to_where_clause(&params)?;
+    // Add chainId to params if provided
+    if let Some(chain_id) = chain_id {
+        params.insert("chainId".to_string(), format!("\"{}\"", chain_id));
+    }
 
-    // Add chainId where clause only if chain_id is provided
-    let final_where_clause = if let Some(chain_id) = chain_id {
-        if where_clause.is_empty() {
-            format!("where: {{chainId: {{_eq: \"{}\"}}}}", chain_id)
-        } else {
-            format!(
-                "where: {{chainId: {{_eq: \"{}\"}}, {}}}",
-                chain_id, where_clause
-            )
-        }
-    } else if !where_clause.is_empty() {
-        format!("where: {{{}}}", where_clause)
-    } else {
-        String::new()
-    };
+    // Convert filters to where clause (flattened)
+    let where_clause = convert_filters_to_where_clause(&params)?;
 
     let mut params_vec = Vec::new();
     if let Some(l) = limit.as_ref() {
@@ -92,8 +81,8 @@ fn convert_query_structure(query: &str, chain_id: Option<&str>) -> Result<String
     if let Some(o) = offset.as_ref() {
         params_vec.push(format!("offset: {}", o));
     }
-    if !final_where_clause.is_empty() {
-        params_vec.push(final_where_clause);
+    if !where_clause.is_empty() {
+        params_vec.push(where_clause);
     }
     let params_str = if params_vec.is_empty() {
         String::new()
@@ -139,24 +128,83 @@ fn convert_meta_query(query: &str) -> Result<String, ConversionError> {
     Err(ConversionError::InvalidQueryFormat)
 }
 
+fn flatten_where_map(mut map: HashMap<String, String>) -> HashMap<String, String> {
+    let mut flat = HashMap::new();
+    for (k, v) in map.drain() {
+        if k == "where" {
+            // Recursively parse and flatten
+            if let Ok(nested) = parse_nested_where_clause(&v) {
+                for (nk, nv) in flatten_where_map(nested) {
+                    flat.insert(nk, nv);
+                }
+            }
+        } else {
+            flat.insert(k, v);
+        }
+    }
+    flat
+}
+
 fn convert_filters_to_where_clause(
     params: &HashMap<String, String>,
 ) -> Result<String, ConversionError> {
-    let mut where_conditions = Vec::new();
+    // Recursively flatten the entire params map
+    let mut flat_filters = flatten_where_map(params.clone());
 
-    for (key, value) in params {
-        if key == "first" || key == "skip" || key == "orderBy" || key == "orderDirection" {
-            continue; // Skip pagination and ordering parameters
+    // Remove pagination/order keys
+    flat_filters.remove("first");
+    flat_filters.remove("skip");
+    flat_filters.remove("orderBy");
+    flat_filters.remove("orderDirection");
+    flat_filters.remove("where");
+
+    // Sort keys to ensure consistent order, with chainId first
+    let mut sorted_keys: Vec<_> = flat_filters.keys().collect();
+    sorted_keys.sort_by(|a, b| {
+        if *a == "chainId" {
+            std::cmp::Ordering::Less
+        } else if *b == "chainId" {
+            std::cmp::Ordering::Greater
+        } else {
+            a.cmp(b)
         }
+    });
 
+    let mut where_conditions = Vec::new();
+    for key in sorted_keys {
+        let value = flat_filters.get(key).unwrap();
         let condition = convert_filter_to_hasura_condition(key, value)?;
         where_conditions.push(condition);
     }
 
-    Ok(where_conditions.join(", "))
+    if where_conditions.is_empty() {
+        return Ok(String::new());
+    }
+
+    Ok(format!("where: {{{}}}", where_conditions.join(", ")))
+}
+
+fn parse_nested_where_clause(
+    where_value: &str,
+) -> Result<HashMap<String, String>, ConversionError> {
+    let mut nested_params = HashMap::new();
+
+    // Remove outer braces if present
+    let content = where_value
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}');
+
+    // Parse the nested where clause using the same logic as parse_graphql_params
+    parse_graphql_params(content, &mut nested_params)?;
+    Ok(nested_params)
 }
 
 fn convert_filter_to_hasura_condition(key: &str, value: &str) -> Result<String, ConversionError> {
+    if key == "where" {
+        // Should never emit a 'where' key at this stage
+        return Ok(String::new());
+    }
     // Handle different filter patterns - check longer suffixes first
     if key.ends_with("_not_starts_with_nocase") {
         let field = &key[..key.len() - 22];
@@ -307,7 +355,8 @@ fn convert_filter_to_hasura_condition(key: &str, value: &str) -> Result<String, 
     }
 
     // Default case: treat as equality filter
-    Ok(format!("{}: {{_eq: {}}}", key, value))
+    let result = format!("{}: {{_eq: {}}}", key, value);
+    Ok(result)
 }
 
 fn extract_entity_and_params(
@@ -374,7 +423,7 @@ fn parse_graphql_params(
             continue;
         }
 
-        if ch == '"' && !escape_next {
+        if ch == '"' {
             in_string = !in_string;
             current_param.push(ch);
             continue;
@@ -400,13 +449,9 @@ fn parse_graphql_params(
                 }
                 ',' => {
                     if brace_count == 0 && bracket_count == 0 {
-                        // This comma separates parameters
-                        if !current_param.trim().is_empty() {
-                            parse_single_param(&current_param, params)?;
-                        }
+                        parse_single_param(&current_param, params)?;
                         current_param.clear();
                     } else {
-                        // This comma is inside braces or brackets
                         current_param.push(ch);
                     }
                 }
@@ -417,7 +462,6 @@ fn parse_graphql_params(
         }
     }
 
-    // Parse the last parameter
     if !current_param.trim().is_empty() {
         parse_single_param(&current_param, params)?;
     }
@@ -429,10 +473,9 @@ fn parse_single_param(
     param_str: &str,
     params: &mut HashMap<String, String>,
 ) -> Result<(), ConversionError> {
-    let parts: Vec<&str> = param_str.trim().split(':').collect();
-    if parts.len() == 2 {
-        let key = parts[0].trim();
-        let value = parts[1].trim();
+    if let Some(idx) = param_str.find(':') {
+        let key = param_str[..idx].trim();
+        let value = param_str[idx + 1..].trim();
         params.insert(key.to_string(), value.to_string());
     }
     Ok(())
@@ -911,5 +954,34 @@ mod tests {
             "query": "query {\n  Stream(where: {chainId: {_eq: \"5\"}, name: {_eq: \"test\"}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_where_clause_with_multiple_filters() {
+        let payload = create_test_payload(
+            "query { streams(where: {alias_contains: \"113\", chainId: \"1\"}) { id alias } }",
+        );
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let query = result["query"].as_str().unwrap();
+        println!("Converted query: {}", query);
+
+        // Check that both filters are included
+        assert!(query.contains("alias: {_ilike: \"%113%\"}"));
+        assert!(query.contains("chainId: {_eq: \"1\"}"));
+        assert!(query.contains("Stream"));
+    }
+
+    #[test]
+    fn test_where_clause_single_filter() {
+        let payload =
+            create_test_payload("query { streams(where: {alias_contains: \"113\"}) { id alias } }");
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let query = result["query"].as_str().unwrap();
+        println!("Converted query: {}", query);
+
+        // Check that the filter is included
+        assert!(query.contains("alias: {_ilike: \"%113%\"}"));
+        assert!(query.contains("chainId: {_eq: \"1\"}"));
+        assert!(query.contains("Stream"));
     }
 }
