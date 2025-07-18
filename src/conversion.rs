@@ -158,6 +158,9 @@ fn convert_filters_to_where_clause(
     flat_filters.remove("orderDirection");
     flat_filters.remove("where");
 
+    // Debug: print the flattened filters
+    eprintln!("DEBUG: flat_filters after flattening: {:?}", flat_filters);
+
     // Sort keys to ensure consistent order, with chainId first
     let mut sorted_keys: Vec<_> = flat_filters.keys().collect();
     sorted_keys.sort_by(|a, b| {
@@ -173,7 +176,13 @@ fn convert_filters_to_where_clause(
     let mut where_conditions = Vec::new();
     for key in sorted_keys {
         let value = flat_filters.get(key).unwrap();
-        let condition = convert_filter_to_hasura_condition(key, value)?;
+        eprintln!("DEBUG: processing key: '{}', value: '{}'", key, value);
+        let condition = if key.contains('.') {
+            convert_nested_filter_to_hasura_condition(key, value)?
+        } else {
+            convert_basic_filter_to_hasura_condition(key, value)?
+        };
+        eprintln!("DEBUG: generated condition: '{}'", condition);
         where_conditions.push(condition);
     }
 
@@ -200,11 +209,15 @@ fn parse_nested_where_clause(
     Ok(nested_params)
 }
 
-fn convert_filter_to_hasura_condition(key: &str, value: &str) -> Result<String, ConversionError> {
+fn convert_basic_filter_to_hasura_condition(
+    key: &str,
+    value: &str,
+) -> Result<String, ConversionError> {
     if key == "where" {
         // Should never emit a 'where' key at this stage
         return Ok(String::new());
     }
+
     // Handle different filter patterns - check longer suffixes first
     if key.ends_with("_not_starts_with_nocase") {
         let field = &key[..key.len() - 22];
@@ -359,6 +372,33 @@ fn convert_filter_to_hasura_condition(key: &str, value: &str) -> Result<String, 
     Ok(result)
 }
 
+fn convert_nested_filter_to_hasura_condition(
+    key: &str,
+    value: &str,
+) -> Result<String, ConversionError> {
+    // Split the key into parent and child parts (e.g., "user.name_starts_with" -> "user" and "name_starts_with")
+    if let Some(dot_idx) = key.rfind('.') {
+        let parent = &key[..dot_idx];
+        let child_key = &key[dot_idx + 1..];
+
+        // Convert the child filter to Hasura condition using the basic conversion
+        let child_condition = convert_basic_filter_to_hasura_condition(child_key, value)?;
+
+        // Create nested structure: parent: { child_condition }
+        // Wrap the child condition in braces
+        Ok(format!(
+            "{}: {{{}}}",
+            parent,
+            child_condition
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+        ))
+    } else {
+        // Fallback to regular conversion if no dot found
+        convert_basic_filter_to_hasura_condition(key, value)
+    }
+}
+
 fn extract_entity_and_params(
     query: &str,
 ) -> Result<(String, HashMap<String, String>, String), ConversionError> {
@@ -473,10 +513,36 @@ fn parse_single_param(
     param_str: &str,
     params: &mut HashMap<String, String>,
 ) -> Result<(), ConversionError> {
-    if let Some(idx) = param_str.find(':') {
-        let key = param_str[..idx].trim();
-        let value = param_str[idx + 1..].trim();
-        params.insert(key.to_string(), value.to_string());
+    let trimmed = param_str.trim();
+    if let Some(idx) = trimmed.find(':') {
+        let key = trimmed[..idx].trim();
+        let value = trimmed[idx + 1..].trim();
+
+        // Special handling for 'where' clause - don't flatten it
+        if key == "where" && value.starts_with('{') && value.ends_with('}') {
+            // Parse the nested object but don't flatten the keys
+            let nested_content = &value[1..value.len() - 1];
+            let mut nested_params = HashMap::new();
+            parse_graphql_params(nested_content, &mut nested_params)?;
+
+            // Add nested params directly without flattening
+            for (nested_key, nested_value) in nested_params {
+                params.insert(nested_key, nested_value);
+            }
+        } else if value.starts_with('{') && value.ends_with('}') {
+            // Parse the nested object
+            let nested_content = &value[1..value.len() - 1];
+            let mut nested_params = HashMap::new();
+            parse_graphql_params(nested_content, &mut nested_params)?;
+
+            // Convert nested params to flattened keys
+            for (nested_key, nested_value) in nested_params {
+                let flattened_key = format!("{}.{}", key, nested_key);
+                params.insert(flattened_key, nested_value);
+            }
+        } else {
+            params.insert(key.to_string(), value.to_string());
+        }
     }
     Ok(())
 }
