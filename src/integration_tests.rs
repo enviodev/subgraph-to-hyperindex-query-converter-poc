@@ -1144,6 +1144,127 @@ async fn test_response_format_comparison() {
     }
 }
 
+#[tokio::test]
+async fn test_fragments_conversion() {
+    // Test query with fragments
+    let subgraph_query = r#"fragment ActionFields on Action {
+  id
+  block
+  category
+  chainId
+}
+
+fragment AssetFields on Asset {
+  id
+  address
+  chainId
+  decimals
+}
+
+query {
+  actions(first: 5) {
+    ...ActionFields
+  }
+  assets(first: 5) {
+    ...AssetFields
+  }
+}"#;
+
+    // Convert the query to Hyperindex format
+    let payload = json!({
+        "query": subgraph_query
+    });
+
+    let converted_result = conversion::convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+    let converted_query = converted_result["query"].as_str().unwrap();
+
+    println!("Original subgraph query with fragments:");
+    println!("{}", subgraph_query);
+    println!("\nConverted Hyperindex query:");
+    println!("{}", converted_query);
+
+    // Forward to Hyperindex
+    let response = forward_to_hyperindex(&converted_result).await;
+    match response {
+        Ok(response_json) => {
+            println!("Hyperindex response: {:?}", response_json);
+
+            // Check for errors
+            if let Some(errors) = response_json.get("errors") {
+                if errors.is_array() && errors.as_array().unwrap().len() > 0 {
+                    panic!("Query returned errors: {:?}", errors);
+                }
+            }
+
+            // Check for data
+            if let Some(data) = response_json.get("data") {
+                if data.is_object() {
+                    let data_obj = data.as_object().unwrap();
+
+                    // Check for Action entity
+                    if let Some(actions) = data_obj.get("Action") {
+                        if actions.is_array() {
+                            let actions_array = actions.as_array().unwrap();
+                            println!("Found {} actions", actions_array.len());
+                            assert!(actions_array.len() > 0, "Expected actions to return data");
+
+                            // Check that actions have the expected structure
+                            if actions_array.len() > 0 {
+                                let first_action = &actions_array[0];
+                                assert!(first_action.get("id").is_some(), "Action should have id");
+                                assert!(
+                                    first_action.get("block").is_some(),
+                                    "Action should have block"
+                                );
+                                assert!(
+                                    first_action.get("category").is_some(),
+                                    "Action should have category"
+                                );
+                                assert!(
+                                    first_action.get("chainId").is_some(),
+                                    "Action should have chainId"
+                                );
+                            }
+                        }
+                    }
+
+                    // Check for Asset entity
+                    if let Some(assets) = data_obj.get("Asset") {
+                        if assets.is_array() {
+                            let assets_array = assets.as_array().unwrap();
+                            println!("Found {} assets", assets_array.len());
+                            assert!(assets_array.len() > 0, "Expected assets to return data");
+
+                            // Check that assets have the expected structure
+                            if assets_array.len() > 0 {
+                                let first_asset = &assets_array[0];
+                                assert!(first_asset.get("id").is_some(), "Asset should have id");
+                                assert!(
+                                    first_asset.get("address").is_some(),
+                                    "Asset should have address"
+                                );
+                                assert!(
+                                    first_asset.get("chainId").is_some(),
+                                    "Asset should have chainId"
+                                );
+                                assert!(
+                                    first_asset.get("decimals").is_some(),
+                                    "Asset should have decimals"
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                panic!("No data field in response");
+            }
+        }
+        Err(e) => {
+            panic!("Failed to forward fragments query to Hyperindex: {}", e);
+        }
+    }
+}
+
 async fn forward_to_hyperindex(query: &Value) -> Result<Value, Box<dyn std::error::Error>> {
     let hyperindex_url = env::var("TEST_HYPERINDEX_URL")
         .unwrap_or_else(|_| "https://indexer.hyperindex.xyz/53b7e25/v1/graphql".to_string());
@@ -1167,10 +1288,13 @@ async fn make_thegraph_request(query: &str) -> Result<Value, Box<dyn std::error:
         "query": query
     });
 
+    let api_key =
+        std::env::var("TEST_THEGRAPH_API_KEY").expect("TEST_THEGRAPH_API_KEY must be set");
+
     let response = client
         .post("https://gateway.thegraph.com/api/subgraphs/id/AvDAMYYHGaEwn9F9585uqq6MM5CfvRtYcb7KjK7LKPCt")
         .header("Content-Type", "application/json")
-        .header("Authorization", "Bearer ac5c29b9c91daa7f78e37fc73860ff60")
+        .header("Authorization", format!("Bearer {}", api_key))
         .json(&payload)
         .send()
         .await?;

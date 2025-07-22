@@ -41,57 +41,318 @@ fn convert_query_structure(query: &str, chain_id: Option<&str>) -> Result<String
         return convert_meta_query(query);
     }
 
-    // Find the entity and its parameters
-    let (entity, mut params, selection) = extract_entity_and_params(query)?;
-    let entity_cap = singularize_and_capitalize(&entity);
-    let limit = params.get("first").cloned();
-    let offset = params.get("skip").cloned();
-    let _order_by_field = params
-        .get("orderBy")
-        .cloned()
-        .unwrap_or_else(|| "id".to_string());
-    let _order_direction = params
-        .get("orderDirection")
-        .cloned()
-        .unwrap_or_else(|| "asc".to_string());
+    // Extract fragments and main query
+    let (fragments, main_query) = extract_fragments_and_main_query(query)?;
 
-    // Single-entity by primary key: singular entity, only 'id' param
-    if !entity.ends_with('s') && params.len() == 1 && params.contains_key("id") {
-        let pk_query = format!(
-            "query {{\n  {}_by_pk(id: {}) {}\n}}",
-            entity,
-            params.get("id").unwrap(),
-            selection
-        );
-        return Ok(pk_query);
+    // Convert the main query
+    let converted_main_query = convert_main_query(&main_query, chain_id)?;
+
+    // Combine fragments with converted main query
+    let mut result = String::new();
+    if !fragments.is_empty() {
+        result.push_str(&fragments);
+        result.push('\n');
+    }
+    result.push_str(&converted_main_query);
+
+    Ok(result)
+}
+
+fn extract_fragments_and_main_query(query: &str) -> Result<(String, String), ConversionError> {
+    let mut fragments = String::new();
+    let mut main_query = String::new();
+    let mut lines = query.lines();
+    let mut in_fragment = false;
+    let mut brace_count = 0;
+
+    // Extract fragments
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("fragment ") {
+            // Start of a fragment
+            in_fragment = true;
+            brace_count = 0;
+            fragments.push_str(line);
+            fragments.push('\n');
+        } else if in_fragment {
+            // Check if we've reached the query keyword (which means fragments are done)
+            if trimmed.starts_with("query") {
+                in_fragment = false;
+                // Don't include the query line in fragments, add it to main query instead
+                main_query.push_str(line);
+                main_query.push('\n');
+            } else {
+                // We're inside a fragment
+                fragments.push_str(line);
+                fragments.push('\n');
+
+                // Count braces to know when fragment ends
+                for char in line.chars() {
+                    if char == '{' {
+                        brace_count += 1;
+                    } else if char == '}' {
+                        brace_count -= 1;
+                        if brace_count == 0 {
+                            // Fragment ended
+                            in_fragment = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if trimmed.starts_with("query") {
+            // Start of main query
+            main_query.push_str(line);
+            main_query.push('\n');
+            // Don't break here, continue to collect the rest of the main query
+        } else if !trimmed.is_empty() && !in_fragment {
+            // Part of main query (but not inside a fragment)
+            main_query.push_str(line);
+            main_query.push('\n');
+        }
     }
 
-    // Add chainId to params if provided
-    if let Some(chain_id) = chain_id {
-        params.insert("chainId".to_string(), format!("\"{}\"", chain_id));
+    // Add remaining lines to main query
+    for line in lines {
+        main_query.push_str(line);
+        main_query.push('\n');
     }
 
-    // Convert filters to where clause (flattened)
-    let where_clause = convert_filters_to_where_clause(&params)?;
+    Ok((fragments.trim().to_string(), main_query.trim().to_string()))
+}
 
-    let mut params_vec = Vec::new();
-    if let Some(l) = limit.as_ref() {
-        params_vec.push(format!("limit: {}", l));
-    }
-    if let Some(o) = offset.as_ref() {
-        params_vec.push(format!("offset: {}", o));
-    }
-    if !where_clause.is_empty() {
-        params_vec.push(where_clause);
-    }
-    let params_str = if params_vec.is_empty() {
-        String::new()
+fn convert_main_query(main_query: &str, chain_id: Option<&str>) -> Result<String, ConversionError> {
+    // Strip the outer query { } wrapper if present
+    let stripped_query = if main_query.trim().starts_with("query {") {
+        let content = main_query.trim();
+        let start = content.find('{').unwrap() + 1;
+        let end = content.rfind('}').unwrap();
+        &content[start..end]
     } else {
-        format!("({})", params_vec.join(", "))
+        main_query
     };
 
-    let hyperindex_query = format!("query {{\n  {}{} {}\n}}", entity_cap, params_str, selection);
-    Ok(hyperindex_query)
+    // Extract multiple entities from the main query
+    let entities = extract_multiple_entities(stripped_query)?;
+
+    let mut converted_entities = Vec::new();
+
+    for (entity, params, selection) in entities {
+        let entity_cap = singularize_and_capitalize(&entity);
+        let limit = params.get("first").cloned();
+        let offset = params.get("skip").cloned();
+
+        // Single-entity by primary key: singular entity, only 'id' param
+        if !entity.ends_with('s') && params.len() == 1 && params.contains_key("id") {
+            let pk_query = format!(
+                "  {}_by_pk(id: {}) {}",
+                entity,
+                params.get("id").unwrap(),
+                selection
+            );
+            converted_entities.push(pk_query);
+            continue;
+        }
+
+        let mut converted_params = params.clone();
+
+        // Add chainId to params if provided
+        if let Some(chain_id) = chain_id {
+            converted_params.insert("chainId".to_string(), format!("\"{}\"", chain_id));
+        }
+
+        // Convert filters to where clause (flattened)
+        let where_clause = convert_filters_to_where_clause(&converted_params)?;
+
+        let mut params_vec = Vec::new();
+        if let Some(l) = limit.as_ref() {
+            params_vec.push(format!("limit: {}", l));
+        }
+        if let Some(o) = offset.as_ref() {
+            params_vec.push(format!("offset: {}", o));
+        }
+        if !where_clause.is_empty() {
+            params_vec.push(where_clause);
+        }
+        let params_str = if params_vec.is_empty() {
+            String::new()
+        } else {
+            format!("({})", params_vec.join(", "))
+        };
+
+        let converted_entity = format!("  {}{} {}", entity_cap, params_str, selection);
+        converted_entities.push(converted_entity);
+    }
+
+    let converted_query = format!("query {{\n{}\n}}", converted_entities.join("\n"));
+    Ok(converted_query)
+}
+
+fn extract_multiple_entities(
+    query: &str,
+) -> Result<Vec<(String, HashMap<String, String>, String)>, ConversionError> {
+    let mut entities = Vec::new();
+
+    // Find all entity patterns in the query using regex-like approach
+    let mut current_pos = 0;
+    let query_chars: Vec<char> = query.chars().collect();
+
+    while current_pos < query_chars.len() {
+        // Skip whitespace
+        while current_pos < query_chars.len() && query_chars[current_pos].is_whitespace() {
+            current_pos += 1;
+        }
+
+        if current_pos >= query_chars.len() {
+            break;
+        }
+
+        // Look for entity name (word characters)
+        let mut entity_start = current_pos;
+        while current_pos < query_chars.len() && query_chars[current_pos].is_alphanumeric() {
+            current_pos += 1;
+        }
+
+        if current_pos == entity_start {
+            current_pos += 1;
+            continue;
+        }
+
+        let entity_name: String = query_chars[entity_start..current_pos].iter().collect();
+
+        // Skip whitespace
+        while current_pos < query_chars.len() && query_chars[current_pos].is_whitespace() {
+            current_pos += 1;
+        }
+
+        // Check if next character is '('
+        if current_pos < query_chars.len() && query_chars[current_pos] == '(' {
+            // Find the closing parenthesis
+            let mut paren_count = 0;
+            let mut param_start = current_pos + 1;
+            let mut param_end = None;
+
+            while current_pos < query_chars.len() {
+                match query_chars[current_pos] {
+                    '(' => paren_count += 1,
+                    ')' => {
+                        paren_count -= 1;
+                        if paren_count == 0 {
+                            param_end = Some(current_pos);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                current_pos += 1;
+            }
+
+            if let Some(param_end) = param_end {
+                let params_str: String = query_chars[param_start..param_end].iter().collect();
+
+                let mut params = HashMap::new();
+                parse_graphql_params(&params_str, &mut params)?;
+
+                // Find the opening brace
+                while current_pos < query_chars.len() && query_chars[current_pos] != '{' {
+                    current_pos += 1;
+                }
+
+                if current_pos < query_chars.len() {
+                    // Extract selection set
+                    let selection = extract_selection_set_chars(&query_chars, current_pos)?;
+
+                    entities.push((entity_name, params, selection));
+                }
+            }
+        }
+
+        current_pos += 1;
+    }
+
+    if entities.is_empty() {
+        return Err(ConversionError::InvalidQueryFormat);
+    }
+
+    Ok(entities)
+}
+
+fn extract_selection_set_chars(
+    chars: &[char],
+    start_pos: usize,
+) -> Result<String, ConversionError> {
+    let mut selection = String::new();
+    let mut brace_count = 0;
+    let mut pos = start_pos;
+
+    while pos < chars.len() {
+        let char = chars[pos];
+
+        if char == '{' {
+            brace_count += 1;
+            selection.push(char);
+        } else if char == '}' {
+            brace_count -= 1;
+            selection.push(char);
+            if brace_count == 0 {
+                return Ok(selection);
+            }
+        } else {
+            selection.push(char);
+        }
+
+        pos += 1;
+    }
+
+    Err(ConversionError::InvalidQueryFormat)
+}
+
+fn extract_selection_set(
+    lines: &[&str],
+    start_line: usize,
+    brace_start: usize,
+) -> Result<String, ConversionError> {
+    let mut selection = String::new();
+    let mut brace_count = 0;
+    let mut started = false;
+
+    // Start from the opening brace
+    let mut current_line = &lines[start_line][brace_start..];
+
+    loop {
+        for char in current_line.chars() {
+            if char == '{' {
+                brace_count += 1;
+                if !started {
+                    started = true;
+                    selection.push(char);
+                } else {
+                    selection.push(char);
+                }
+            } else if char == '}' {
+                brace_count -= 1;
+                selection.push(char);
+                if brace_count == 0 {
+                    return Ok(selection);
+                }
+            } else {
+                if started {
+                    selection.push(char);
+                }
+            }
+        }
+
+        // Move to next line
+        if start_line + 1 < lines.len() {
+            selection.push('\n');
+            current_line = lines[start_line + 1];
+        } else {
+            break;
+        }
+    }
+
+    Err(ConversionError::InvalidQueryFormat)
 }
 
 fn convert_meta_query(query: &str) -> Result<String, ConversionError> {
@@ -158,9 +419,6 @@ fn convert_filters_to_where_clause(
     flat_filters.remove("orderDirection");
     flat_filters.remove("where");
 
-    // Debug: print the flattened filters
-    eprintln!("DEBUG: flat_filters after flattening: {:?}", flat_filters);
-
     // Sort keys to ensure consistent order, with chainId first
     let mut sorted_keys: Vec<_> = flat_filters.keys().collect();
     sorted_keys.sort_by(|a, b| {
@@ -176,13 +434,11 @@ fn convert_filters_to_where_clause(
     let mut where_conditions = Vec::new();
     for key in sorted_keys {
         let value = flat_filters.get(key).unwrap();
-        eprintln!("DEBUG: processing key: '{}', value: '{}'", key, value);
         let condition = if key.contains('.') {
             convert_nested_filter_to_hasura_condition(key, value)?
         } else {
             convert_basic_filter_to_hasura_condition(key, value)?
         };
-        eprintln!("DEBUG: generated condition: '{}'", condition);
         where_conditions.push(condition);
     }
 
