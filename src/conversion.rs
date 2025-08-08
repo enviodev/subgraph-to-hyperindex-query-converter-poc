@@ -269,7 +269,6 @@ fn extract_multiple_entities(
 
             // Found an entity definition with parameters, extract parameters
             let params_start = current_pos + 1;
-            let mut brace_count = 0;
             let mut paren_count = 1; // We're already inside the first parenthesis
 
             while current_pos < query_chars.len() {
@@ -286,8 +285,6 @@ fn extract_multiple_entities(
                             break;
                         }
                     }
-                    '{' => brace_count += 1,
-                    '}' => brace_count -= 1,
                     _ => {}
                 }
             }
@@ -398,82 +395,7 @@ fn extract_multiple_entities(
     Ok(entities)
 }
 
-fn extract_selection_set_chars(
-    chars: &[char],
-    start_pos: usize,
-) -> Result<String, ConversionError> {
-    let mut selection = String::new();
-    let mut brace_count = 0;
-    let mut pos = start_pos;
-
-    while pos < chars.len() {
-        let char = chars[pos];
-
-        if char == '{' {
-            brace_count += 1;
-            selection.push(char);
-        } else if char == '}' {
-            brace_count -= 1;
-            selection.push(char);
-            if brace_count == 0 {
-                return Ok(selection);
-            }
-        } else {
-            selection.push(char);
-        }
-
-        pos += 1;
-    }
-
-    Err(ConversionError::InvalidQueryFormat)
-}
-
-fn extract_selection_set(
-    lines: &[&str],
-    start_line: usize,
-    brace_start: usize,
-) -> Result<String, ConversionError> {
-    let mut selection = String::new();
-    let mut brace_count = 0;
-    let mut started = false;
-
-    // Start from the opening brace
-    let mut current_line = &lines[start_line][brace_start..];
-
-    loop {
-        for char in current_line.chars() {
-            if char == '{' {
-                brace_count += 1;
-                if !started {
-                    started = true;
-                    selection.push(char);
-                } else {
-                    selection.push(char);
-                }
-            } else if char == '}' {
-                brace_count -= 1;
-                selection.push(char);
-                if brace_count == 0 {
-                    return Ok(selection);
-                }
-            } else {
-                if started {
-                    selection.push(char);
-                }
-            }
-        }
-
-        // Move to next line
-        if start_line + 1 < lines.len() {
-            selection.push('\n');
-            current_line = lines[start_line + 1];
-        } else {
-            break;
-        }
-    }
-
-    Err(ConversionError::InvalidQueryFormat)
-}
+// Removed unused selection set helpers
 
 fn convert_meta_query(query: &str) -> Result<String, ConversionError> {
     // Check if it's a simple _meta { block { number } } query
@@ -634,7 +556,7 @@ fn convert_filters_to_where_clause(
                 .push((child_key, child_value));
         }
 
-        for (field_name, conditions) in grouped_child_filters {
+        for (_field_name, conditions) in grouped_child_filters {
             if conditions.len() == 1 {
                 // Single condition for this field
                 let (k, v) = &conditions[0];
@@ -843,73 +765,9 @@ fn convert_basic_filter_to_hasura_condition(
     Ok(result)
 }
 
-fn convert_nested_filter_to_hasura_condition(
-    key: &str,
-    value: &str,
-) -> Result<String, ConversionError> {
-    // Split the key into parent and child parts (e.g., "user.name_starts_with" -> "user" and "name_starts_with")
-    if let Some(dot_idx) = key.rfind('.') {
-        let parent = &key[..dot_idx];
-        let child_key = &key[dot_idx + 1..];
+// Removed unused nested filter helper
 
-        // Convert the child filter to Hasura condition using the basic conversion
-        let child_condition = convert_basic_filter_to_hasura_condition(child_key, value)?;
-
-        // Create nested structure: parent: { child_condition }
-        // Wrap the child condition in braces
-        Ok(format!(
-            "{}: {{{}}}",
-            parent,
-            child_condition
-                .trim_start_matches('{')
-                .trim_end_matches('}')
-        ))
-    } else {
-        // Fallback to regular conversion if no dot found
-        convert_basic_filter_to_hasura_condition(key, value)
-    }
-}
-
-fn extract_entity_and_params(
-    query: &str,
-) -> Result<(String, HashMap<String, String>, String), ConversionError> {
-    // Find the first entity (e.g., streams(first: 2, ...))
-    let open_brace = query.find('{').ok_or(ConversionError::InvalidQueryFormat)?;
-    let after_brace = &query[open_brace + 1..];
-    let entity_start = after_brace
-        .find(|c: char| c.is_alphabetic())
-        .ok_or(ConversionError::InvalidQueryFormat)?;
-    let after_entity = &after_brace[entity_start..];
-    let entity_end = after_entity
-        .find(|c: char| c == '(' || c.is_whitespace())
-        .ok_or(ConversionError::InvalidQueryFormat)?;
-    let entity = &after_entity[..entity_end];
-    let mut params = HashMap::new();
-    let mut selection = String::new();
-
-    // Find the parameters section
-    let mut after_params = after_entity;
-    if let Some(param_start) = after_entity.find('(') {
-        if let Some(param_end) = after_entity.find(')') {
-            let params_str = &after_entity[param_start + 1..param_end];
-            parse_graphql_params(params_str, &mut params)?;
-            after_params = &after_entity[param_end + 1..];
-        }
-    }
-    // Find the selection set after the parameters (or directly after entity if no params)
-    if let Some(selection_start) = after_params.find('{') {
-        let selection_content = &after_params[selection_start + 1..];
-        if let Some(selection_end) = find_matching_brace(selection_content) {
-            selection = selection_content[..selection_end].trim().to_string();
-        }
-    }
-
-    Ok((
-        entity.to_string(),
-        params,
-        format!("{{\n    {}\n  }}", selection),
-    ))
-}
+// Removed unused entity/params extractor
 
 fn parse_graphql_params(
     params_str: &str,
@@ -1018,22 +876,7 @@ fn parse_single_param(
     Ok(())
 }
 
-fn find_matching_brace(content: &str) -> Option<usize> {
-    let mut brace_count = 1; // already inside one {
-    for (i, ch) in content.chars().enumerate() {
-        match ch {
-            '{' => brace_count += 1,
-            '}' => {
-                brace_count -= 1;
-                if brace_count == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
+// Removed unused brace matching helper
 
 fn singularize_and_capitalize(s: &str) -> String {
     // Naive singularization: remove trailing 's' if present

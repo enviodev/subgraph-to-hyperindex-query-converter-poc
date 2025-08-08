@@ -27,7 +27,8 @@ async fn main() {
     let app = Router::new()
         .route("/", post(handle_query))
         .route("/debug", post(handle_debug))
-        .route("/chainId/:chain_id", post(handle_chain_query));
+        .route("/chainId/:chain_id", post(handle_chain_query))
+        .route("/chainId/:chain_id/debug", post(handle_chain_debug));
 
     let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
     tracing::info!("listening on {}", addr);
@@ -124,6 +125,33 @@ async fn handle_debug(Json(payload): Json<Value>) -> impl IntoResponse {
         }
         Err(e) => {
             tracing::error!("Debug conversion error: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": e.to_string()
+                })),
+            )
+        }
+    }
+}
+
+async fn handle_chain_debug(
+    Path(chain_id): Path<String>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    tracing::info!(
+        "Received chain debug for chain_id: {}, payload: {:?}",
+        chain_id,
+        payload
+    );
+
+    match conversion::convert_subgraph_to_hyperindex(&payload, Some(&chain_id)) {
+        Ok(converted_query) => {
+            tracing::info!("Converted chain debug query: {:?}", converted_query);
+            (StatusCode::OK, Json(converted_query))
+        }
+        Err(e) => {
+            tracing::error!("Chain debug conversion error: {}", e);
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
