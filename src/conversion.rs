@@ -885,12 +885,38 @@ fn parse_single_param(
 // Removed unused brace matching helper
 
 fn singularize_and_capitalize(s: &str) -> String {
-    // Naive singularization: remove trailing 's' if present
-    let singular = if s.ends_with('s') && s.len() > 1 {
-        &s[..s.len() - 1]
+    // Improved singularization to cover common English plural forms used in schema entity names
+    // First, handle irregulars explicitly
+    let lower = s.to_lowercase();
+    let irregulars: &[(&str, &str)] = &[("tranches", "tranche")];
+    if let Some((_, singular_irregular)) = irregulars.iter().find(|(pl, _)| *pl == &lower) {
+        let mut c = singular_irregular.chars();
+        return match c.next() {
+            None => String::new(),
+            Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        };
+    }
+
+    let singular: String = if s.ends_with("ies") && s.len() > 3 {
+        // companies -> company
+        format!("{}y", &s[..s.len() - 3])
+    } else if s.ends_with("ches")
+        || s.ends_with("shes")
+        || s.ends_with("xes")
+        || s.ends_with("zes")
+        || s.ends_with("sses")
+        || s.ends_with("oes")
+        || s.ends_with("ses")
+    {
+        // batches -> batch, boxes -> box, addresses -> address, heroes -> hero, users -> user (via 'ses')
+        s[..s.len() - 2].to_string()
+    } else if s.ends_with('s') && s.len() > 1 {
+        // Default: drop trailing 's'
+        s[..s.len() - 1].to_string()
     } else {
-        s
+        s.to_string()
     };
+
     let mut c = singular.chars();
     match c.next() {
         None => String::new(),
@@ -1412,5 +1438,33 @@ mod tests {
         assert!(query.contains("Action("));
         assert!(query.contains("where: {chainId: {_eq: \"1\"}}"));
         assert!(query.contains("...ActionFragment"));
+    }
+
+    #[test]
+    fn test_batches_pluralization_with_fragment() {
+        let payload = create_test_payload(
+            "query GetBatches { batches { ...BatchFragment } } fragment BatchFragment on Batch { id label size }",
+        );
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let query = result["query"].as_str().unwrap();
+        // Should singularize to Batch and include chainId where
+        assert!(query.contains("fragment BatchFragment on Batch"));
+        assert!(query.contains("Batch("));
+        assert!(query.contains("where: {chainId: {_eq: \"1\"}}"));
+        assert!(query.contains("...BatchFragment"));
+    }
+
+    #[test]
+    fn test_tranches_pluralization_with_fragment() {
+        let payload = create_test_payload(
+            "query GetTranches { tranches { ...TrancheFragment } } fragment TrancheFragment on Tranche { id position amount timestamp endTime startTime startAmount endAmount }",
+        );
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let query = result["query"].as_str().unwrap();
+        // Should singularize to Tranche and include chainId where
+        assert!(query.contains("fragment TrancheFragment on Tranche"));
+        assert!(query.contains("Tranche("));
+        assert!(query.contains("where: {chainId: {_eq: \"1\"}}"));
+        assert!(query.contains("...TrancheFragment"));
     }
 }

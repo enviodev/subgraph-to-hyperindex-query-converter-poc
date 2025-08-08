@@ -47,7 +47,8 @@ async fn handle_query(Json(payload): Json<Value>) -> impl IntoResponse {
             match forward_to_hyperindex(&converted_query).await {
                 Ok(response) => {
                     tracing::info!("Hyperindex response: {:?}", response);
-                    (StatusCode::OK, Json(response))
+                    let transformed = transform_response_to_subgraph_shape(response);
+                    (StatusCode::OK, Json(transformed))
                 }
                 Err(e) => {
                     tracing::error!("Hyperindex request error: {}", e);
@@ -90,7 +91,8 @@ async fn handle_chain_query(
             match forward_to_hyperindex(&converted_query).await {
                 Ok(response) => {
                     tracing::info!("Hyperindex response: {:?}", response);
-                    (StatusCode::OK, Json(response))
+                    let transformed = transform_response_to_subgraph_shape(response);
+                    (StatusCode::OK, Json(transformed))
                 }
                 Err(e) => {
                     tracing::error!("Hyperindex request error: {}", e);
@@ -176,4 +178,89 @@ async fn forward_to_hyperindex(query: &Value) -> Result<Value, Box<dyn std::erro
 
     let response_json: Value = response.json().await?;
     Ok(response_json)
+}
+
+fn transform_response_to_subgraph_shape(resp: Value) -> Value {
+    let mut root = match resp {
+        Value::Object(map) => map,
+        other => return other,
+    };
+
+    if let Some(Value::Object(data_obj)) = root.get_mut("data") {
+        let mut new_data = serde_json::Map::new();
+        for (key, value) in data_obj.clone().into_iter() {
+            let new_key = if key.ends_with("_by_pk") {
+                key.trim_end_matches("_by_pk").to_ascii_lowercase()
+            } else if is_pascal_case(&key) {
+                pluralize_lowercase(&key)
+            } else {
+                key
+            };
+            new_data.insert(new_key, value);
+        }
+        *data_obj = new_data;
+    }
+
+    Value::Object(root)
+}
+
+fn is_pascal_case(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphabetic())
+}
+
+fn pluralize_lowercase(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with('y') {
+        let pre = lower.chars().rev().nth(1).unwrap_or('a');
+        if !matches!(pre, 'a' | 'e' | 'i' | 'o' | 'u') {
+            return format!("{}ies", &lower[..lower.len() - 1]);
+        }
+    }
+    if lower.ends_with("ch")
+        || lower.ends_with("sh")
+        || lower.ends_with('x')
+        || lower.ends_with('z')
+        || lower.ends_with('s')
+        || lower.ends_with('o')
+    {
+        return format!("{}es", lower);
+    }
+    format!("{}s", lower)
+}
+
+#[cfg(test)]
+mod response_shape_tests {
+    use super::*;
+
+    #[test]
+    fn test_pluralize_lowercase_basic() {
+        assert_eq!(pluralize_lowercase("Stream"), "streams");
+        assert_eq!(pluralize_lowercase("Batch"), "batches");
+        assert_eq!(pluralize_lowercase("Asset"), "assets");
+        assert_eq!(pluralize_lowercase("Action"), "actions");
+    }
+
+    #[test]
+    fn test_transform_data_keys() {
+        let resp = serde_json::json!({
+            "data": {
+                "Stream": [ {"id": 1} ],
+                "Batch": [ {"id": 2} ],
+                "stream_by_pk": {"id": 3}
+            }
+        });
+        let out = transform_response_to_subgraph_shape(resp);
+        let data = out.get("data").unwrap();
+        assert!(data.get("streams").is_some());
+        assert!(data.get("batches").is_some());
+        assert!(data.get("stream").is_some());
+        assert!(data.get("Stream").is_none());
+        assert!(data.get("Batch").is_none());
+        assert!(data.get("stream_by_pk").is_none());
+    }
 }
