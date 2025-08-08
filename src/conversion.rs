@@ -173,6 +173,8 @@ fn convert_main_query(main_query: &str, chain_id: Option<&str>) -> Result<String
             params_vec.push(format!("offset: {}", o));
         }
         if !where_clause.is_empty() {
+            println!("DEBUG: Original where_clause: '{}'", where_clause);
+            // The where_clause already has the correct format, just use it directly
             params_vec.push(where_clause);
         }
         let params_str = if params_vec.is_empty() {
@@ -193,13 +195,22 @@ fn extract_multiple_entities(
     query: &str,
 ) -> Result<Vec<(String, HashMap<String, String>, String)>, ConversionError> {
     let mut entities = Vec::new();
-
-    // Find all entity patterns in the query using regex-like approach
-    let mut current_pos = 0;
     let query_chars: Vec<char> = query.chars().collect();
+    let mut current_pos = 0;
+
+    println!("DEBUG: Parsing query: {}", query);
+
+    // Skip opening brace if present
+    while current_pos < query_chars.len() && query_chars[current_pos].is_whitespace() {
+        current_pos += 1;
+    }
+    if current_pos < query_chars.len() && query_chars[current_pos] == '{' {
+        println!("DEBUG: Found opening brace at position {}", current_pos);
+        current_pos += 1;
+    }
 
     while current_pos < query_chars.len() {
-        // Skip whitespace
+        // Skip whitespace and newlines
         while current_pos < query_chars.len() && query_chars[current_pos].is_whitespace() {
             current_pos += 1;
         }
@@ -208,8 +219,13 @@ fn extract_multiple_entities(
             break;
         }
 
-        // Look for entity name (word characters)
-        let mut entity_start = current_pos;
+        println!(
+            "DEBUG: Looking for entity at position {}, char: '{}'",
+            current_pos, query_chars[current_pos]
+        );
+
+        // Look for entity name (word characters) - only at top level
+        let entity_start = current_pos;
         while current_pos < query_chars.len() && query_chars[current_pos].is_alphanumeric() {
             current_pos += 1;
         }
@@ -219,62 +235,166 @@ fn extract_multiple_entities(
             continue;
         }
 
-        let entity_name: String = query_chars[entity_start..current_pos].iter().collect();
+        let entity_name = query_chars[entity_start..current_pos]
+            .iter()
+            .collect::<String>();
+        println!("DEBUG: Found potential entity name: '{}'", entity_name);
 
-        // Skip whitespace
+        // Skip if this is not a valid entity name (too short or common words)
+        if entity_name.len() < 2
+            || [
+                "id", "in", "on", "to", "of", "at", "by", "is", "it", "as", "or", "an", "if", "up",
+                "do", "go", "no", "so", "we", "he", "me", "be", "my", "am", "us", "hi", "lo", "ok",
+                "hi", "lo", "ok",
+            ]
+            .contains(&entity_name.as_str())
+        {
+            println!(
+                "DEBUG: Skipping '{}' as it's not a valid entity name",
+                entity_name
+            );
+            current_pos += 1;
+            continue;
+        }
+
+        // Look for opening parenthesis or brace after entity name (with optional whitespace)
         while current_pos < query_chars.len() && query_chars[current_pos].is_whitespace() {
             current_pos += 1;
         }
 
-        // Check if next character is '('
+        let mut params = HashMap::new();
+
         if current_pos < query_chars.len() && query_chars[current_pos] == '(' {
-            // Find the closing parenthesis
-            let mut paren_count = 0;
-            let mut param_start = current_pos + 1;
-            let mut param_end = None;
+            println!("DEBUG: Found entity definition for '{}'", entity_name);
+
+            // Found an entity definition with parameters, extract parameters
+            let params_start = current_pos + 1;
+            let mut brace_count = 0;
+            let mut paren_count = 1; // We're already inside the first parenthesis
 
             while current_pos < query_chars.len() {
+                current_pos += 1;
+                if current_pos >= query_chars.len() {
+                    break;
+                }
+
                 match query_chars[current_pos] {
                     '(' => paren_count += 1,
                     ')' => {
                         paren_count -= 1;
                         if paren_count == 0 {
-                            param_end = Some(current_pos);
                             break;
                         }
                     }
+                    '{' => brace_count += 1,
+                    '}' => brace_count -= 1,
                     _ => {}
                 }
-                current_pos += 1;
             }
 
-            if let Some(param_end) = param_end {
-                let params_str: String = query_chars[param_start..param_end].iter().collect();
+            if current_pos >= query_chars.len() {
+                break;
+            }
 
-                let mut params = HashMap::new();
-                parse_graphql_params(&params_str, &mut params)?;
+            let params_str = query_chars[params_start..current_pos]
+                .iter()
+                .collect::<String>();
+            parse_graphql_params(&params_str, &mut params)?;
 
-                // Find the opening brace
-                while current_pos < query_chars.len() && query_chars[current_pos] != '{' {
-                    current_pos += 1;
+            // Advance past the closing parenthesis
+            current_pos += 1;
+        } else if current_pos < query_chars.len() && query_chars[current_pos] == '{' {
+            println!(
+                "DEBUG: Found entity definition for '{}' (no parameters)",
+                entity_name
+            );
+            // Entity without parameters, continue to selection set
+        } else {
+            println!(
+                "DEBUG: No opening parenthesis or brace after '{}', skipping",
+                entity_name
+            );
+            // This is not an entity definition, skip
+            current_pos += 1;
+            continue;
+        }
+
+        // Look for opening brace for selection set
+        while current_pos < query_chars.len() && query_chars[current_pos].is_whitespace() {
+            current_pos += 1;
+        }
+
+        println!(
+            "DEBUG: After params, at position {}, char: '{}'",
+            current_pos,
+            if current_pos < query_chars.len() {
+                query_chars[current_pos]
+            } else {
+                '?'
+            }
+        );
+
+        if current_pos >= query_chars.len() || query_chars[current_pos] != '{' {
+            println!(
+                "DEBUG: No opening brace for selection set after '{}', skipping",
+                entity_name
+            );
+            // No selection set, skip this entity
+            current_pos += 1;
+            continue;
+        }
+
+        println!(
+            "DEBUG: Found opening brace for selection set at position {}",
+            current_pos
+        );
+
+        // Extract selection set
+        let selection_start = current_pos + 1;
+        let mut brace_count = 1; // We're already inside the first brace
+
+        while current_pos < query_chars.len() {
+            current_pos += 1;
+            if current_pos >= query_chars.len() {
+                break;
+            }
+
+            match query_chars[current_pos] {
+                '{' => brace_count += 1,
+                '}' => {
+                    brace_count -= 1;
+                    if brace_count == 0 {
+                        break;
+                    }
                 }
-
-                if current_pos < query_chars.len() {
-                    // Extract selection set
-                    let selection = extract_selection_set_chars(&query_chars, current_pos)?;
-
-                    entities.push((entity_name, params, selection));
-                }
+                _ => {}
             }
         }
 
-        current_pos += 1;
+        if current_pos >= query_chars.len() {
+            break;
+        }
+
+        let selection_set = format!(
+            "{{\n    {}\n  }}",
+            query_chars[selection_start..current_pos]
+                .iter()
+                .collect::<String>()
+                .trim()
+        );
+
+        println!("DEBUG: Found entity: {}", entity_name);
+        println!("DEBUG: Params for {}: {:?}", entity_name, params);
+        println!("DEBUG: Selection for {}: {}", entity_name, selection_set);
+
+        entities.push((entity_name, params, selection_set));
     }
 
-    if entities.is_empty() {
-        return Err(ConversionError::InvalidQueryFormat);
-    }
-
+    println!(
+        "DEBUG: Found {} entities: {:?}",
+        entities.len(),
+        entities.iter().map(|(name, _, _)| name).collect::<Vec<_>>()
+    );
     Ok(entities)
 }
 
@@ -419,8 +539,44 @@ fn convert_filters_to_where_clause(
     flat_filters.remove("orderDirection");
     flat_filters.remove("where");
 
+    // Group filters by parent object to avoid duplicates
+    let mut grouped_filters: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut basic_filters: HashMap<String, Vec<(String, String)>> = HashMap::new();
+
+    for (key, value) in flat_filters {
+        if key.contains('.') {
+            // This is a nested filter (e.g., "user.name_starts_with")
+            if let Some(dot_idx) = key.rfind('.') {
+                let parent = &key[..dot_idx];
+                let child_key = &key[dot_idx + 1..];
+
+                grouped_filters
+                    .entry(parent.to_string())
+                    .or_insert_with(HashMap::new)
+                    .insert(child_key.to_string(), value);
+            }
+        } else {
+            // This is a basic filter - group by field name
+            let field_name = if key.contains('_') {
+                // Extract the base field name (e.g., "alias" from "alias_contains")
+                if let Some(underscore_idx) = key.find('_') {
+                    &key[..underscore_idx]
+                } else {
+                    &key
+                }
+            } else {
+                &key
+            };
+
+            basic_filters
+                .entry(field_name.to_string())
+                .or_insert_with(Vec::new)
+                .push((key, value));
+        }
+    }
+
     // Sort keys to ensure consistent order, with chainId first
-    let mut sorted_keys: Vec<_> = flat_filters.keys().collect();
+    let mut sorted_keys: Vec<_> = basic_filters.keys().collect();
     sorted_keys.sort_by(|a, b| {
         if *a == "chainId" {
             std::cmp::Ordering::Less
@@ -432,14 +588,73 @@ fn convert_filters_to_where_clause(
     });
 
     let mut where_conditions = Vec::new();
+
+    // Add basic filters
+    let mut and_conditions = Vec::new();
     for key in sorted_keys {
-        let value = flat_filters.get(key).unwrap();
-        let condition = if key.contains('.') {
-            convert_nested_filter_to_hasura_condition(key, value)?
+        let conditions = basic_filters.get(key).unwrap();
+        if conditions.len() == 1 {
+            // Single condition for this field
+            let (k, v) = &conditions[0];
+            let condition = convert_basic_filter_to_hasura_condition(&k, &v)?;
+            where_conditions.push(condition);
         } else {
-            convert_basic_filter_to_hasura_condition(key, value)?
-        };
-        where_conditions.push(condition);
+            // Multiple conditions for the same field - wrap in _and
+            for (k, v) in conditions {
+                let condition = convert_basic_filter_to_hasura_condition(&k, &v)?;
+                and_conditions.push(format!("{{{}}}", condition));
+            }
+        }
+    }
+    if !and_conditions.is_empty() {
+        where_conditions.push(format!("_and: [{}]", and_conditions.join(", ")));
+    }
+
+    // Add grouped nested filters
+    for (parent, child_filters) in grouped_filters {
+        let mut child_conditions = Vec::new();
+        let mut child_and_conditions = Vec::new();
+
+        // Group child filters by field name to handle duplicates
+        let mut grouped_child_filters: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (child_key, child_value) in child_filters {
+            let field_name = if child_key.contains('_') {
+                if let Some(underscore_idx) = child_key.find('_') {
+                    &child_key[..underscore_idx]
+                } else {
+                    &child_key
+                }
+            } else {
+                &child_key
+            };
+
+            grouped_child_filters
+                .entry(field_name.to_string())
+                .or_insert_with(Vec::new)
+                .push((child_key, child_value));
+        }
+
+        for (field_name, conditions) in grouped_child_filters {
+            if conditions.len() == 1 {
+                // Single condition for this field
+                let (k, v) = &conditions[0];
+                let condition = convert_basic_filter_to_hasura_condition(&k, &v)?;
+                child_conditions.push(condition);
+            } else {
+                // Multiple conditions for the same field - wrap in _and
+                for (k, v) in conditions {
+                    let condition = convert_basic_filter_to_hasura_condition(&k, &v)?;
+                    child_and_conditions.push(format!("{{{}}}", condition));
+                }
+            }
+        }
+
+        if !child_and_conditions.is_empty() {
+            child_conditions.push(format!("_and: [{}]", child_and_conditions.join(", ")));
+        }
+
+        let nested_condition = format!("{}: {{{}}}", parent, child_conditions.join(", "));
+        where_conditions.push(nested_condition);
     }
 
     if where_conditions.is_empty() {
@@ -476,34 +691,34 @@ fn convert_basic_filter_to_hasura_condition(
 
     // Handle different filter patterns - check longer suffixes first
     if key.ends_with("_not_starts_with_nocase") {
-        let field = &key[..key.len() - 22];
+        let field = &key[..key.len() - 23];
         return Ok(format!(
-            "{}: {{_not: {{_ilike: \"{}%\"}}}}",
+            "_not: {{{}: {{_ilike: \"{}%\"}}}}",
             field,
             value.trim_matches('"')
         ));
     }
 
     if key.ends_with("_not_ends_with_nocase") {
-        let field = &key[..key.len() - 20];
+        let field = &key[..key.len() - 21];
         return Ok(format!(
-            "{}: {{_not: {{_ilike: \"%{}\"}}}}",
+            "_not: {{{}: {{_ilike: \"%{}\"}}}}",
             field,
             value.trim_matches('"')
         ));
     }
 
     if key.ends_with("_not_contains_nocase") {
-        let field = &key[..key.len() - 19];
+        let field = &key[..key.len() - 20];
         return Ok(format!(
-            "{}: {{_not: {{_ilike: \"%{}%\"}}}}",
+            "_not: {{{}: {{_ilike: \"%{}%\"}}}}",
             field,
             value.trim_matches('"')
         ));
     }
 
     if key.ends_with("_starts_with_nocase") {
-        let field = &key[..key.len() - 18];
+        let field = &key[..key.len() - 19];
         return Ok(format!(
             "{}: {{_ilike: \"{}%\"}}",
             field,
@@ -512,7 +727,7 @@ fn convert_basic_filter_to_hasura_condition(
     }
 
     if key.ends_with("_ends_with_nocase") {
-        let field = &key[..key.len() - 16];
+        let field = &key[..key.len() - 17];
         return Ok(format!(
             "{}: {{_ilike: \"%{}\"}}",
             field,
@@ -521,7 +736,7 @@ fn convert_basic_filter_to_hasura_condition(
     }
 
     if key.ends_with("_contains_nocase") {
-        let field = &key[..key.len() - 15];
+        let field = &key[..key.len() - 16];
         return Ok(format!(
             "{}: {{_ilike: \"%{}%\"}}",
             field,
@@ -532,7 +747,7 @@ fn convert_basic_filter_to_hasura_condition(
     if key.ends_with("_not_starts_with") {
         let field = &key[..key.len() - 16];
         return Ok(format!(
-            "{}: {{_not: {{_ilike: \"{}%\"}}}}",
+            "_not: {{{}: {{_ilike: \"{}%\"}}}}",
             field,
             value.trim_matches('"')
         ));
@@ -541,7 +756,7 @@ fn convert_basic_filter_to_hasura_condition(
     if key.ends_with("_not_ends_with") {
         let field = &key[..key.len() - 14];
         return Ok(format!(
-            "{}: {{_not: {{_ilike: \"%{}\"}}}}",
+            "_not: {{{}: {{_ilike: \"%{}\"}}}}",
             field,
             value.trim_matches('"')
         ));
@@ -550,7 +765,7 @@ fn convert_basic_filter_to_hasura_condition(
     if key.ends_with("_not_contains") {
         let field = &key[..key.len() - 13];
         return Ok(format!(
-            "{}: {{_not: {{_ilike: \"%{}%\"}}}}",
+            "_not: {{{}: {{_ilike: \"%{}%\"}}}}",
             field,
             value.trim_matches('"')
         ));
@@ -985,7 +1200,7 @@ mod tests {
             create_test_payload("query { streams(name_not_contains: \"test\") { id name } }");
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_not: {_ilike: \"%test%\"}}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, _not: {name: {_ilike: \"%test%\"}}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
@@ -1018,7 +1233,7 @@ mod tests {
             create_test_payload("query { streams(name_not_starts_with: \"test\") { id name } }");
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_not: {_ilike: \"test%\"}}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, _not: {name: {_ilike: \"test%\"}}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
@@ -1029,7 +1244,7 @@ mod tests {
             create_test_payload("query { streams(name_not_ends_with: \"test\") { id name } }");
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_not: {_ilike: \"%test\"}}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, _not: {name: {_ilike: \"%test\"}}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
@@ -1040,7 +1255,7 @@ mod tests {
             create_test_payload("query { streams(name_contains_nocase: \"test\") { id name } }");
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_ilike: \"%test%\"}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_ilike: \"%test%\"}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
@@ -1052,7 +1267,7 @@ mod tests {
         );
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_not: {_ilike: \"%test%\"}}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, _not: {name: {_ilike: \"%test%\"}}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
@@ -1063,7 +1278,7 @@ mod tests {
             create_test_payload("query { streams(name_starts_with_nocase: \"test\") { id name } }");
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_ilike: \"test%\"}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_ilike: \"test%\"}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
@@ -1074,7 +1289,7 @@ mod tests {
             create_test_payload("query { streams(name_ends_with_nocase: \"test\") { id name } }");
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_ilike: \"%test\"}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name: {_ilike: \"%test\"}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
@@ -1086,7 +1301,7 @@ mod tests {
         );
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_not: {_ilike: \"test%\"}}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, _not: {name: {_ilike: \"test%\"}}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
@@ -1098,7 +1313,7 @@ mod tests {
         );
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, name_: {_not: {_ilike: \"%test\"}}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}, _not: {name: {_ilike: \"%test\"}}}) {\n    id name\n  }\n}"
         });
         assert_eq!(result, expected);
     }
