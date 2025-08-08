@@ -172,6 +172,14 @@ fn convert_main_query(main_query: &str, chain_id: Option<&str>) -> Result<String
         if let Some(o) = offset.as_ref() {
             params_vec.push(format!("offset: {}", o));
         }
+        // Map orderBy/orderDirection to Hasura order_by
+        if let Some(order_field) = params.get("orderBy") {
+            let order_dir = params
+                .get("orderDirection")
+                .map(|s| s.as_str())
+                .unwrap_or("asc");
+            params_vec.push(format!("order_by: {{{}: {}}}", order_field, order_dir));
+        }
         if !where_clause.is_empty() {
             println!("DEBUG: Original where_clause: '{}'", where_clause);
             // The where_clause already has the correct format, just use it directly
@@ -1236,7 +1244,19 @@ mod tests {
         );
         let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
         let expected = json!({
-            "query": "query {\n  Stream(where: {chainId: {_eq: \"1\"}}) {\n    id name\n  }\n}"
+            "query": "query {\n  Stream(order_by: {name: desc}, where: {chainId: {_eq: \"1\"}}) {\n    id name\n  }\n}"
+        });
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_order_by_with_skip_and_where() {
+        let payload = create_test_payload(
+            "query { streams(orderBy: alias, skip: 10, where: {alias_contains: \"113\"}) { alias asset { address } } }",
+        );
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let expected = json!({
+            "query": "query {\n  Stream(offset: 10, order_by: {alias: asc}, where: {chainId: {_eq: \"1\"}, alias: {_ilike: \"%113%\"}}) {\n    alias asset { address }\n  }\n}"
         });
         assert_eq!(result, expected);
     }
