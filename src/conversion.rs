@@ -59,76 +59,74 @@ fn convert_query_structure(query: &str, chain_id: Option<&str>) -> Result<String
 }
 
 fn extract_fragments_and_main_query(query: &str) -> Result<(String, String), ConversionError> {
+    // Handle both multi-line and single-line queries.
+    // Strategy: scan the full string for 'fragment ' blocks and remove them from main.
     let mut fragments = String::new();
-    let mut main_query = String::new();
-    let mut lines = query.lines();
-    let mut in_fragment = false;
-    let mut brace_count = 0;
+    let mut remaining = query.to_string();
 
-    // Extract fragments
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim();
+    loop {
+        if let Some(start_idx) = remaining.find("fragment ") {
+            // Find the start of the fragment body '{'
+            let after_start = &remaining[start_idx..];
+            if let Some(open_idx_rel) = after_start.find('{') {
+                let open_idx = start_idx + open_idx_rel;
+                // Walk to the matching '}'
+                let mut brace_count = 1;
+                let mut pos = open_idx + 1;
+                let chars: Vec<char> = remaining.chars().collect();
+                while pos < chars.len() {
+                    match chars[pos] {
+                        '{' => brace_count += 1,
+                        '}' => {
+                            brace_count -= 1;
+                            if brace_count == 0 {
+                                // Capture the fragment text [start_idx..=pos]
+                                let fragment_text: String = chars[start_idx..=pos].iter().collect();
+                                if !fragments.is_empty() {
+                                    fragments.push('\n');
+                                }
+                                fragments.push_str(fragment_text.trim());
 
-        if trimmed.starts_with("fragment ") {
-            // Start of a fragment
-            in_fragment = true;
-            brace_count = 0;
-            fragments.push_str(line);
-            fragments.push('\n');
-        } else if in_fragment {
-            // Check if we've reached the query keyword (which means fragments are done)
-            if trimmed.starts_with("query") {
-                in_fragment = false;
-                // Don't include the query line in fragments, add it to main query instead
-                main_query.push_str(line);
-                main_query.push('\n');
-            } else {
-                // We're inside a fragment
-                fragments.push_str(line);
-                fragments.push('\n');
-
-                // Count braces to know when fragment ends
-                for char in line.chars() {
-                    if char == '{' {
-                        brace_count += 1;
-                    } else if char == '}' {
-                        brace_count -= 1;
-                        if brace_count == 0 {
-                            // Fragment ended
-                            in_fragment = false;
-                            break;
+                                // Remove it from remaining
+                                let prefix: String = chars[..start_idx].iter().collect();
+                                let suffix: String = chars[pos + 1..].iter().collect();
+                                remaining = format!("{}{}", prefix.trim_end(), suffix);
+                                break;
+                            }
                         }
+                        _ => {}
                     }
+                    pos += 1;
                 }
+                // Continue loop to find next fragment in updated 'remaining'
+                continue;
+            } else {
+                // 'fragment ' without body; stop scanning to avoid infinite loop
+                break;
             }
-        } else if trimmed.starts_with("query") {
-            // Start of main query
-            main_query.push_str(line);
-            main_query.push('\n');
-            // Don't break here, continue to collect the rest of the main query
-        } else if !trimmed.is_empty() && !in_fragment {
-            // Part of main query (but not inside a fragment)
-            main_query.push_str(line);
-            main_query.push('\n');
+        } else {
+            break;
         }
     }
 
-    // Add remaining lines to main query
-    for line in lines {
-        main_query.push_str(line);
-        main_query.push('\n');
-    }
-
-    Ok((fragments.trim().to_string(), main_query.trim().to_string()))
+    let main_query = remaining.trim().to_string();
+    Ok((fragments, main_query))
 }
 
 fn convert_main_query(main_query: &str, chain_id: Option<&str>) -> Result<String, ConversionError> {
-    // Strip the outer query { } wrapper if present
-    let stripped_query = if main_query.trim().starts_with("query {") {
+    // Strip the outer query { } wrapper if present, including named operations like `query Name { ... }`
+    let stripped_owned;
+    let stripped_query = if main_query.trim().starts_with("query") {
         let content = main_query.trim();
-        let start = content.find('{').unwrap() + 1;
-        let end = content.rfind('}').unwrap();
-        &content[start..end]
+        if let (Some(start_brace), Some(end_brace)) = (content.find('{'), content.rfind('}')) {
+            stripped_owned = content[start_brace + 1..end_brace].to_string();
+            &stripped_owned
+        } else {
+            main_query
+        }
+    } else if main_query.trim().starts_with('{') {
+        // Already a selection body
+        main_query
     } else {
         main_query
     };
@@ -1383,5 +1381,36 @@ mod tests {
         assert!(query.contains("alias: {_ilike: \"%113%\"}"));
         assert!(query.contains("chainId: {_eq: \"1\"}"));
         assert!(query.contains("Stream"));
+    }
+
+    #[test]
+    fn test_named_query_with_fragments_after_operation() {
+        let payload = create_test_payload(
+            "query GetActions { actions { ...ActionFragment } }\nfragment ContractFragment on Contract { id address category version }\nfragment ActionFragment on Action { id chainId stream { id } category hash block timestamp from addressA addressB amountA amountB contract { ...ContractFragment } }",
+        );
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let query = result["query"].as_str().unwrap();
+        // Fragments should be preserved and appear in the final query
+        assert!(query.contains("fragment ContractFragment on Contract"));
+        assert!(query.contains("fragment ActionFragment on Action"));
+        // The converted main query should target Action with chainId filter
+        assert!(query.contains("Action("));
+        assert!(query.contains("where: {chainId: {_eq: \"1\"}}"));
+        // The selection should still reference the fragment
+        assert!(query.contains("...ActionFragment"));
+    }
+
+    #[test]
+    fn test_single_line_query_with_fragments() {
+        let payload = create_test_payload(
+            "query GetActions { actions { ...ActionFragment } } fragment ContractFragment on Contract { id address category version } fragment ActionFragment on Action { id chainId stream { id } category hash block timestamp from addressA addressB amountA amountB contract { ...ContractFragment } }",
+        );
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let query = result["query"].as_str().unwrap();
+        assert!(query.contains("fragment ContractFragment on Contract"));
+        assert!(query.contains("fragment ActionFragment on Action"));
+        assert!(query.contains("Action("));
+        assert!(query.contains("where: {chainId: {_eq: \"1\"}}"));
+        assert!(query.contains("...ActionFragment"));
     }
 }
