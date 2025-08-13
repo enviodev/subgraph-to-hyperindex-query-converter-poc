@@ -6,7 +6,7 @@ use axum::{
     Router,
 };
 use dotenv;
-use reqwest;
+// use reqwest; // avoid bringing reqwest::StatusCode into scope
 use serde_json::Value;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -54,15 +54,44 @@ async fn handle_query(Json(payload): Json<Value>) -> impl IntoResponse {
             match forward_to_hyperindex(&converted_query).await {
                 Ok(response) => {
                     tracing::info!("Hyperindex response: {:?}", response);
+                    // If upstream returned GraphQL errors, surface them with debug info
+                    if response.get("errors").is_some() {
+                        let hyperindex_url =
+                            std::env::var("HYPERINDEX_URL").expect("HYPERINDEX_URL must be set");
+                        let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
+                        let debug = serde_json::json!({
+                            "convertedQuery": converted_query.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                            "hyperindexUrl": hyperindex_url,
+                        });
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(serde_json::json!({
+                                "errors": response.get("errors").cloned().unwrap_or_default(),
+                                "debug": debug,
+                                "subgraphResponse": subgraph_debug,
+                            })),
+                        );
+                    }
+
                     let transformed = transform_response_to_subgraph_shape(response);
                     (StatusCode::OK, Json(transformed))
                 }
                 Err(e) => {
                     tracing::error!("Hyperindex request error: {}", e);
+                    let hyperindex_url =
+                        std::env::var("HYPERINDEX_URL").expect("HYPERINDEX_URL must be set");
+                    let details = e.to_string();
+                    let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
-                            "error": format!("Hyperindex request failed: {}", e)
+                            "error": "Hyperindex request failed",
+                            "details": details,
+                            "debug": {
+                                "convertedQuery": converted_query.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                                "hyperindexUrl": hyperindex_url,
+                            },
+                            "subgraphResponse": subgraph_debug,
                         })),
                     )
                 }
@@ -70,10 +99,29 @@ async fn handle_query(Json(payload): Json<Value>) -> impl IntoResponse {
         }
         Err(e) => {
             tracing::error!("Conversion error: {}", e);
+            let reasoning = match &e {
+                conversion::ConversionError::InvalidQueryFormat =>
+                    "The provided GraphQL query string could not be parsed. Ensure it is a valid single operation with balanced braces and proper syntax.",
+                conversion::ConversionError::MissingField(field) =>
+                    if field == "query" { "The request body must include a 'query' string field." } else { "A required field is missing from the request." },
+                conversion::ConversionError::UnsupportedFilter(_filter) =>
+                    "This filter is not currently supported by the converter. Consider a supported equivalent or remove it.",
+                conversion::ConversionError::ComplexMetaQuery =>
+                    "Only _meta { block { number } } is supported. Remove extra fields like hash, timestamp, etc.",
+            };
+            let details = e.to_string();
+            let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": e.to_string()
+                    "error": "Conversion failed",
+                    "details": details,
+                    "reasoning": reasoning,
+                    "debug": {
+                        "inputQuery": payload.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                        "chainId": serde_json::Value::Null,
+                    },
+                    "subgraphResponse": subgraph_debug,
                 })),
             )
         }
@@ -98,15 +146,45 @@ async fn handle_chain_query(
             match forward_to_hyperindex(&converted_query).await {
                 Ok(response) => {
                     tracing::info!("Hyperindex response: {:?}", response);
+                    if response.get("errors").is_some() {
+                        let hyperindex_url =
+                            std::env::var("HYPERINDEX_URL").expect("HYPERINDEX_URL must be set");
+                        let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
+                        let debug = serde_json::json!({
+                            "convertedQuery": converted_query.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                            "hyperindexUrl": hyperindex_url,
+                            "chainId": chain_id,
+                        });
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(serde_json::json!({
+                                "errors": response.get("errors").cloned().unwrap_or_default(),
+                                "debug": debug,
+                                "subgraphResponse": subgraph_debug,
+                            })),
+                        );
+                    }
+
                     let transformed = transform_response_to_subgraph_shape(response);
                     (StatusCode::OK, Json(transformed))
                 }
                 Err(e) => {
                     tracing::error!("Hyperindex request error: {}", e);
+                    let hyperindex_url =
+                        std::env::var("HYPERINDEX_URL").expect("HYPERINDEX_URL must be set");
+                    let details = e.to_string();
+                    let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
-                            "error": format!("Hyperindex request failed: {}", e)
+                            "error": "Hyperindex request failed",
+                            "details": details,
+                            "debug": {
+                                "convertedQuery": converted_query.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                                "hyperindexUrl": hyperindex_url,
+                                "chainId": chain_id,
+                            },
+                            "subgraphResponse": subgraph_debug,
                         })),
                     )
                 }
@@ -114,10 +192,29 @@ async fn handle_chain_query(
         }
         Err(e) => {
             tracing::error!("Conversion error: {}", e);
+            let reasoning = match &e {
+                conversion::ConversionError::InvalidQueryFormat =>
+                    "The provided GraphQL query string could not be parsed. Ensure it is a valid single operation with balanced braces and proper syntax.",
+                conversion::ConversionError::MissingField(field) =>
+                    if field == "query" { "The request body must include a 'query' string field." } else { "A required field is missing from the request." },
+                conversion::ConversionError::UnsupportedFilter(_filter) =>
+                    "This filter is not currently supported by the converter. Consider a supported equivalent or remove it.",
+                conversion::ConversionError::ComplexMetaQuery =>
+                    "Only _meta { block { number } } is supported. Remove extra fields like hash, timestamp, etc.",
+            };
+            let details = e.to_string();
+            let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": e.to_string()
+                    "error": "Conversion failed",
+                    "details": details,
+                    "reasoning": reasoning,
+                    "debug": {
+                        "inputQuery": payload.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                        "chainId": chain_id,
+                    },
+                    "subgraphResponse": subgraph_debug,
                 })),
             )
         }
@@ -134,10 +231,29 @@ async fn handle_debug(Json(payload): Json<Value>) -> impl IntoResponse {
         }
         Err(e) => {
             tracing::error!("Debug conversion error: {}", e);
+            let reasoning = match &e {
+                conversion::ConversionError::InvalidQueryFormat =>
+                    "The provided GraphQL query string could not be parsed. Ensure it is a valid single operation with balanced braces and proper syntax.",
+                conversion::ConversionError::MissingField(field) =>
+                    if field == "query" { "The request body must include a 'query' string field." } else { "A required field is missing from the request." },
+                conversion::ConversionError::UnsupportedFilter(_filter) =>
+                    "This filter is not currently supported by the converter. Consider a supported equivalent or remove it.",
+                conversion::ConversionError::ComplexMetaQuery =>
+                    "Only _meta { block { number } } is supported. Remove extra fields like hash, timestamp, etc.",
+            };
+            let details = e.to_string();
+            let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": e.to_string()
+                    "error": "Conversion failed",
+                    "details": details,
+                    "reasoning": reasoning,
+                    "debug": {
+                        "inputQuery": payload.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                        "chainId": serde_json::Value::Null,
+                    },
+                    "subgraphResponse": subgraph_debug,
                 })),
             )
         }
@@ -161,19 +277,39 @@ async fn handle_chain_debug(
         }
         Err(e) => {
             tracing::error!("Chain debug conversion error: {}", e);
+            let reasoning = match &e {
+                conversion::ConversionError::InvalidQueryFormat =>
+                    "The provided GraphQL query string could not be parsed. Ensure it is a valid single operation with balanced braces and proper syntax.",
+                conversion::ConversionError::MissingField(field) =>
+                    if field == "query" { "The request body must include a 'query' string field." } else { "A required field is missing from the request." },
+                conversion::ConversionError::UnsupportedFilter(_filter) =>
+                    "This filter is not currently supported by the converter. Consider a supported equivalent or remove it.",
+                conversion::ConversionError::ComplexMetaQuery =>
+                    "Only _meta { block { number } } is supported. Remove extra fields like hash, timestamp, etc.",
+            };
+            let details = e.to_string();
+            let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": e.to_string()
+                    "error": "Conversion failed",
+                    "details": details,
+                    "reasoning": reasoning,
+                    "debug": {
+                        "inputQuery": payload.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                        "chainId": chain_id,
+                    },
+                    "subgraphResponse": subgraph_debug,
                 })),
             )
         }
     }
 }
 
-async fn forward_to_hyperindex(query: &Value) -> Result<Value, Box<dyn std::error::Error>> {
-    let hyperindex_url = std::env::var("HYPERINDEX_URL")
-        .unwrap_or_else(|_| "https://indexer.hyperindex.xyz/53b7e25/v1/graphql".to_string());
+async fn forward_to_hyperindex(
+    query: &Value,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let hyperindex_url = std::env::var("HYPERINDEX_URL").expect("HYPERINDEX_URL must be set");
 
     let client = reqwest::Client::new();
     let response = client
@@ -238,6 +374,62 @@ fn pluralize_lowercase(name: &str) -> String {
         return format!("{}es", lower);
     }
     format!("{}s", lower)
+}
+
+async fn maybe_fetch_subgraph_debug(payload: Value) -> Option<Value> {
+    let url = match std::env::var("SUBGRAPH_DEBUG_URL") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return None,
+    };
+
+    let client = reqwest::Client::new();
+    let mut req = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .json(&payload);
+
+    // Optional auth headers for compatible subgraph endpoints
+    // Priority: explicit custom header/value → bearer token → x-api-key fallbacks
+    if let (Ok(header_name), Ok(header_value)) = (
+        std::env::var("SUBGRAPH_AUTH_HEADER"),
+        std::env::var("SUBGRAPH_AUTH_VALUE"),
+    ) {
+        if !header_name.trim().is_empty() && !header_value.trim().is_empty() {
+            req = req.header(header_name, header_value);
+        }
+    } else if let Ok(token) = std::env::var("SUBGRAPH_BEARER_TOKEN") {
+        if !token.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+    } else if let Ok(key) = std::env::var("SUBGRAPH_API_KEY") {
+        if !key.is_empty() {
+            req = req.header("x-api-key", key);
+        }
+    } else if let Ok(key) = std::env::var("THEGRAPH_API_KEY") {
+        if !key.is_empty() {
+            req = req.header("x-api-key", key);
+        }
+    } else if let Ok(key) = std::env::var("TEST_THEGRAPH_API_KEY") {
+        if !key.is_empty() {
+            req = req.header("x-api-key", key);
+        }
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+
+    let status = resp.status().as_u16();
+    let body: Value = match resp.json().await {
+        Ok(b) => b,
+        Err(_) => return None,
+    };
+
+    Some(serde_json::json!({
+        "status": status,
+        "body": body,
+    }))
 }
 
 #[cfg(test)]
