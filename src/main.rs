@@ -10,6 +10,7 @@ use reqwest;
 use serde_json::Value;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 use tracing;
 use tracing_subscriber;
 
@@ -24,11 +25,17 @@ async fn main() {
 
     tracing_subscriber::fmt::init();
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers(Any);
+
     let app = Router::new()
         .route("/", post(handle_query))
         .route("/debug", post(handle_debug))
         .route("/chainId/:chain_id", post(handle_chain_query))
-        .route("/chainId/:chain_id/debug", post(handle_chain_debug));
+        .route("/chainId/:chain_id/debug", post(handle_chain_debug))
+        .layer(cors);
 
     let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
     tracing::info!("listening on {}", addr);
