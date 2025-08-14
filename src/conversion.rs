@@ -82,6 +82,7 @@ fn extract_fragments_and_main_query(query: &str) -> Result<(String, String), Con
                             if brace_count == 0 {
                                 // Capture the fragment text [start_idx..=pos]
                                 let fragment_text: String = chars[start_idx..=pos].iter().collect();
+                                let fragment_text = sanitize_fragment_arguments(&fragment_text);
                                 if !fragments.is_empty() {
                                     fragments.push('\n');
                                 }
@@ -138,8 +139,15 @@ fn convert_main_query(main_query: &str, chain_id: Option<&str>) -> Result<String
 
     for (entity, params, selection) in entities {
         let entity_cap = singularize_and_capitalize(&entity);
-        let limit = params.get("first").cloned();
-        let offset = params.get("skip").cloned();
+        // Only include limit/offset if they are literals, not GraphQL variables (e.g., $first/$skip)
+        let limit = match params.get("first").cloned() {
+            Some(v) if v.trim_start().starts_with('$') => None,
+            other => other,
+        };
+        let offset = match params.get("skip").cloned() {
+            Some(v) if v.trim_start().starts_with('$') => None,
+            other => other,
+        };
 
         // Single-entity by primary key: singular entity, only 'id' param
         if !entity.ends_with('s') && params.len() == 1 && params.contains_key("id") {
@@ -176,7 +184,12 @@ fn convert_main_query(main_query: &str, chain_id: Option<&str>) -> Result<String
                 .get("orderDirection")
                 .map(|s| s.as_str())
                 .unwrap_or("asc");
-            params_vec.push(format!("order_by: {{{}: {}}}", order_field, order_dir));
+            // Ignore order_by if the order field is a variable (e.g., $orderBy) to keep query valid
+            if !order_field.trim_start().starts_with('$')
+                && !order_dir.trim_start().starts_with('$')
+            {
+                params_vec.push(format!("order_by: {{{}: {}}}", order_field, order_dir));
+            }
         }
         if !where_clause.is_empty() {
             println!("DEBUG: Original where_clause: '{}'", where_clause);
@@ -378,13 +391,13 @@ fn extract_multiple_entities(
             break;
         }
 
-        let selection_set = format!(
-            "{{\n    {}\n  }}",
-            query_chars[selection_start..current_pos]
-                .iter()
-                .collect::<String>()
-                .trim()
-        );
+        let raw_selection: String = query_chars[selection_start..current_pos]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
+        let sanitized = sanitize_selection_set(&raw_selection);
+        let selection_set = format!("{{\n    {}\n  }}", sanitized);
 
         println!("DEBUG: Found entity: {}", entity_name);
         println!("DEBUG: Params for {}: {:?}", entity_name, params);
@@ -399,6 +412,81 @@ fn extract_multiple_entities(
         entities.iter().map(|(name, _, _)| name).collect::<Vec<_>>()
     );
     Ok(entities)
+}
+
+fn sanitize_selection_set(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            in_string = !in_string;
+            output.push(ch);
+            continue;
+        }
+
+        if !in_string && ch == '(' {
+            // Remove balanced parentheses and their contents
+            let mut depth: i32 = 1;
+            let mut in_args_string = false;
+            while let Some(nc) = chars.next() {
+                if nc == '"' {
+                    in_args_string = !in_args_string;
+                    continue;
+                }
+                if !in_args_string {
+                    if nc == '(' {
+                        depth += 1;
+                    } else if nc == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Do not push the parentheses or their content
+            continue;
+        }
+
+        output.push(ch);
+    }
+
+    output
+}
+
+fn sanitize_fragment_arguments(fragment_text: &str) -> String {
+    // Only sanitize the selection body after the fragment header
+    // Find the first '{' and its matching '}' and strip args in between
+    let mut chars: Vec<char> = fragment_text.chars().collect();
+    let Some(open_idx) = chars.iter().position(|c| *c == '{') else {
+        return fragment_text.to_string();
+    };
+    // Find matching closing brace
+    let mut brace_count = 1i32;
+    let mut pos = open_idx + 1;
+    while pos < chars.len() {
+        match chars[pos] {
+            '{' => brace_count += 1,
+            '}' => {
+                brace_count -= 1;
+                if brace_count == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        pos += 1;
+    }
+    if pos >= chars.len() {
+        return fragment_text.to_string();
+    }
+    let header: String = chars[..open_idx + 1].iter().collect();
+    let body: String = chars[open_idx + 1..pos].iter().collect();
+    let tail: String = chars[pos..].iter().collect();
+    let sanitized_body = sanitize_selection_set(body.trim());
+    format!("{}{}{}", header, sanitized_body, tail)
 }
 
 // Removed unused selection set helpers

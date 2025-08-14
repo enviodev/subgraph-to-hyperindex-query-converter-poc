@@ -59,8 +59,23 @@ async fn handle_query(Json(payload): Json<Value>) -> impl IntoResponse {
                         let hyperindex_url =
                             std::env::var("HYPERINDEX_URL").expect("HYPERINDEX_URL must be set");
                         let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
+                        // Log both original and converted queries for debugging
+                        let original_query = payload
+                            .get("query")
+                            .and_then(|q| q.as_str())
+                            .unwrap_or_default();
+                        let converted_query_str = converted_query
+                            .get("query")
+                            .and_then(|q| q.as_str())
+                            .unwrap_or_default();
+                        tracing::error!(
+                            original_query = original_query,
+                            converted_query = converted_query_str,
+                            "Upstream GraphQL returned errors for converted query"
+                        );
                         let debug = serde_json::json!({
-                            "convertedQuery": converted_query.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                            "originalQuery": original_query,
+                            "convertedQuery": converted_query_str,
                             "hyperindexUrl": hyperindex_url,
                         });
                         return (
@@ -82,13 +97,29 @@ async fn handle_query(Json(payload): Json<Value>) -> impl IntoResponse {
                         std::env::var("HYPERINDEX_URL").expect("HYPERINDEX_URL must be set");
                     let details = e.to_string();
                     let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
+                    // Log both original and converted queries for debugging
+                    let original_query = payload
+                        .get("query")
+                        .and_then(|q| q.as_str())
+                        .unwrap_or_default();
+                    let converted_query_str = converted_query
+                        .get("query")
+                        .and_then(|q| q.as_str())
+                        .unwrap_or_default();
+                    tracing::error!(
+                        original_query = original_query,
+                        converted_query = converted_query_str,
+                        error = %details,
+                        "Error forwarding converted query to Hyperindex"
+                    );
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
                             "error": "Hyperindex request failed",
                             "details": details,
                             "debug": {
-                                "convertedQuery": converted_query.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                                "originalQuery": original_query,
+                                "convertedQuery": converted_query_str,
                                 "hyperindexUrl": hyperindex_url,
                             },
                             "subgraphResponse": subgraph_debug,
@@ -150,8 +181,24 @@ async fn handle_chain_query(
                         let hyperindex_url =
                             std::env::var("HYPERINDEX_URL").expect("HYPERINDEX_URL must be set");
                         let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
+                        // Log both original and converted queries for debugging
+                        let original_query = payload
+                            .get("query")
+                            .and_then(|q| q.as_str())
+                            .unwrap_or_default();
+                        let converted_query_str = converted_query
+                            .get("query")
+                            .and_then(|q| q.as_str())
+                            .unwrap_or_default();
+                        tracing::error!(
+                            original_query = original_query,
+                            converted_query = converted_query_str,
+                            chain_id = %chain_id,
+                            "Upstream GraphQL returned errors for converted chain query"
+                        );
                         let debug = serde_json::json!({
-                            "convertedQuery": converted_query.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                            "originalQuery": original_query,
+                            "convertedQuery": converted_query_str,
                             "hyperindexUrl": hyperindex_url,
                             "chainId": chain_id,
                         });
@@ -174,13 +221,30 @@ async fn handle_chain_query(
                         std::env::var("HYPERINDEX_URL").expect("HYPERINDEX_URL must be set");
                     let details = e.to_string();
                     let subgraph_debug = maybe_fetch_subgraph_debug(payload.clone()).await;
+                    // Log both original and converted queries for debugging
+                    let original_query = payload
+                        .get("query")
+                        .and_then(|q| q.as_str())
+                        .unwrap_or_default();
+                    let converted_query_str = converted_query
+                        .get("query")
+                        .and_then(|q| q.as_str())
+                        .unwrap_or_default();
+                    tracing::error!(
+                        original_query = original_query,
+                        converted_query = converted_query_str,
+                        chain_id = %chain_id,
+                        error = %details,
+                        "Error forwarding converted chain query to Hyperindex"
+                    );
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
                             "error": "Hyperindex request failed",
                             "details": details,
                             "debug": {
-                                "convertedQuery": converted_query.get("query").and_then(|q| q.as_str()).unwrap_or_default(),
+                                "originalQuery": original_query,
+                                "convertedQuery": converted_query_str,
                                 "hyperindexUrl": hyperindex_url,
                                 "chainId": chain_id,
                             },
