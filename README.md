@@ -326,6 +326,21 @@ RUST_LOG=debug cargo run
 cargo test
 ```
 
+### RUN Docker Locally
+
+build the docker file with a tag
+docker build -t subgraph-converter .
+
+Create a .env file based on the `.env.example` file and run the following:
+docker run -p 3000:3000 --env-file .env subgraph-converter
+
+test query: 
+```
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"query": "query { streams(first: 2, skip: 10) { category cliff cliffTime chainId } }"}' \
+  http://localhost:3000/
+```
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
