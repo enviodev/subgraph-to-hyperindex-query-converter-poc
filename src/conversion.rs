@@ -873,7 +873,7 @@ fn parse_graphql_params(
     let mut in_string = false;
     let mut escape_next = false;
 
-    for ch in params_str.chars() {
+    for (byte_idx, ch) in params_str.char_indices() {
         if escape_next {
             current_param.push(ch);
             escape_next = false;
@@ -915,6 +915,55 @@ fn parse_graphql_params(
                         parse_single_param(&current_param, params)?;
                         current_param.clear();
                     } else {
+                        current_param.push(ch);
+                    }
+                }
+                '\n' | '\r' => {
+                    // Handle newlines as parameter separators when at top level
+                    if brace_count == 0 && bracket_count == 0 {
+                        // Look ahead to see if next non-whitespace content is a parameter name (identifier:)
+                        // Use byte_idx to slice the string correctly (char_indices gives us byte positions)
+                        let next_byte_idx = byte_idx + ch.len_utf8();
+                        let remaining = &params_str[next_byte_idx..];
+                        let trimmed = remaining.trim_start();
+                        
+                        // Check if trimmed starts with identifier pattern followed by colon
+                        // Pattern: [a-zA-Z_][a-zA-Z0-9_]*\s*:
+                        let mut chars_iter = trimmed.chars();
+                        if let Some(first) = chars_iter.next() {
+                            if first.is_alphabetic() || first == '_' {
+                                // Continue reading identifier
+                                let mut is_param = true;
+                                let mut found_colon = false;
+                                for c in chars_iter {
+                                    if c == ':' {
+                                        found_colon = true;
+                                        break;
+                                    } else if c.is_alphanumeric() || c == '_' {
+                                        continue;
+                                    } else if c.is_whitespace() {
+                                        continue;
+                                    } else {
+                                        is_param = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if is_param && found_colon {
+                                    // This is a new parameter, finish current one
+                                    if !current_param.trim().is_empty() {
+                                        parse_single_param(&current_param, params)?;
+                                        current_param.clear();
+                                    }
+                                    // Skip the newline, don't add it to current_param
+                                    continue;
+                                }
+                            }
+                        }
+                        // Not a new parameter, preserve newline in value
+                        current_param.push(ch);
+                    } else {
+                        // Inside braces/brackets, preserve newline
                         current_param.push(ch);
                     }
                 }
@@ -1555,4 +1604,199 @@ mod tests {
         assert!(query.contains("where: {chainId: {_eq: \"1\"}}"));
         assert!(query.contains("...TrancheFragment"));
     }
+
+    #[test]
+    fn test_boolean_filter_in_where_clause() {
+        // Test case for boolean filters in where clause (e.g., isOpen: true)
+        // This should be converted to isOpen: { _eq: true } format
+        let payload = create_test_payload(
+            "query Trades { trades(first: 10000, where: { isOpen: true }) { id trader isOpen } }",
+        );
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let query = result["query"].as_str().unwrap();
+        println!("Converted query: {}", query);
+        
+        // Check that the boolean filter is properly converted to Hasura format
+        assert!(
+            query.contains("isOpen: {_eq: true}"),
+            "Expected isOpen: {{_eq: true}} in converted query, got: {}",
+            query
+        );
+        // Check that Trade entity is used (singularized from trades)
+        assert!(query.contains("Trade("));
+        // Check that chainId is added when provided
+        assert!(query.contains("chainId: {_eq: \"1\"}"));
+    }
+
+    #[test]
+    fn test_boolean_filter_multiline_query_format() {
+        // Test case matching the exact failing query format with multiline structure
+        // This test reproduces the bug where boolean filters in where clauses are not
+        // properly converted to Hasura format when parameters are separated by newlines.
+        // Expected error: "expected an object for type 'Boolean_comparison_exp', but found a boolean"
+        //
+        // Note: This bug specifically affects the DEFAULT case (no suffix) which should use _eq.
+        // Boolean operators with explicit suffixes already work correctly:
+        // - _neq (via _not suffix): isOpen_not: false → isOpen: {_neq: false} ✓ Works
+        // - _in: isOpen_in: [true, false] → isOpen: {_in: [true, false]} ✓ Works  
+        // - _nin: isOpen_not_in: [true] → isOpen: {_nin: [true]} ✓ Works
+        // - _eq (default, no suffix): isOpen: true → isOpen: {_eq: true} ✗ BUG: Affected
+        //
+        // Note: Operators like _gt, _lt, _gte, _lte, _ilike, _contains don't apply to booleans
+        // in Hasura (they're for numeric/string fields). For booleans, only _eq, _neq, _in, _nin are valid.
+        let query = r#"query Trades {
+                                        trades(
+                                            first: 10000
+                                            where: {
+                                            isOpen: true
+                                            }
+                                        ) {
+                                            id
+                                            trader
+                                            isOpen
+                                        }
+                                        }"#;
+        let payload = create_test_payload(query);
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let converted_query = result["query"].as_str().unwrap();
+        println!("Converted query: {}", converted_query);
+        
+        // Check that the boolean filter is properly converted to Hasura format
+        // The incorrect format "isOpen: true" would cause Hyperindex to reject the query
+        assert!(
+            converted_query.contains("isOpen: {_eq: true}"),
+            "Expected isOpen: {{_eq: true}} in converted query.\n\
+             The incorrect format 'isOpen: true' would cause Hyperindex error:\n\
+             'expected an object for type Boolean_comparison_exp, but found a boolean'.\n\
+             Converted query: {}",
+            converted_query
+        );
+        // Check that Trade entity is used (singularized from trades)
+        assert!(converted_query.contains("Trade("));
+    }
+
+    #[test]
+    fn test_boolean_filter_not_operator_multiline() {
+        // Test boolean _neq operator (via _not suffix) in multiline format
+        let query = r#"query {
+  trades(
+    where: {
+      isOpen_not: false
+    }
+  ) {
+    id
+    isOpen
+  }
+}"#;
+        let payload = create_test_payload(query);
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let converted_query = result["query"].as_str().unwrap();
+        println!("Converted query: {}", converted_query);
+        
+        // Check that _neq is properly formatted (this should work since it has a suffix)
+        assert!(
+            converted_query.contains("isOpen: {_neq: false}"),
+            "Expected isOpen: {{_neq: false}} in converted query, got: {}",
+            converted_query
+        );
+    }
+
+    #[test]
+    fn test_boolean_filter_in_operator_multiline() {
+        // Test boolean _in operator in multiline format
+        let query = r#"query {
+                                trades(
+                                    where: {
+                                    isOpen_in: [true, false]
+                                    }
+                                ) {
+                                    id
+                                    isOpen
+                                }
+                                }"#;
+        let payload = create_test_payload(query);
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let converted_query = result["query"].as_str().unwrap();
+        println!("Converted query: {}", converted_query);
+        
+        // Check that _in is properly formatted (this should work since it has a suffix)
+        assert!(
+            converted_query.contains("isOpen: {_in: [true, false]}"),
+            "Expected isOpen: {{_in: [true, false]}} in converted query, got: {}",
+            converted_query
+        );
+    }
+
+    #[test]
+    fn test_boolean_filter_false_in_where_clause() {
+        // Test case for boolean false filters in where clause
+        let payload = create_test_payload(
+            "query { streams(where: { isOpen: false }) { id isOpen } }",
+        );
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let query = result["query"].as_str().unwrap();
+        println!("Converted query: {}", query);
+        
+        // Check that the boolean filter is properly converted to Hasura format
+        assert!(
+            query.contains("isOpen: {_eq: false}"),
+            "Expected isOpen: {{_eq: false}} in converted query, got: {}",
+            query
+        );
+    }
+
+    #[test]
+    fn test_boolean_filter_with_other_filters() {
+        // Test case for boolean filter combined with other filters
+        let payload = create_test_payload(
+            "query { trades(where: { isOpen: true, trader: \"0x123\" }) { id trader isOpen } }",
+        );
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let query = result["query"].as_str().unwrap();
+        println!("Converted query: {}", query);
+        
+        // Check that both filters are properly converted
+        assert!(
+            query.contains("isOpen: {_eq: true}"),
+            "Expected isOpen: {{_eq: true}} in converted query"
+        );
+        assert!(
+            query.contains("trader: {_eq: \"0x123\"}"),
+            "Expected trader: {{_eq: \"0x123\"}} in converted query"
+        );
+    }
+
+    #[test]
+    fn test_numeric_operators_multiline_format() {
+        // Test that numeric operators (_gt, _gte, _lt, _lte) work in multiline format
+        // This verifies that operators with suffixes are handled correctly
+        let query = r#"query {
+  streams(
+    where: {
+      amount_gt: 100
+      amount_lte: 1000
+    }
+  ) {
+    id
+    amount
+  }
+}"#;
+        let payload = create_test_payload(query);
+        let result = convert_subgraph_to_hyperindex(&payload, Some("1")).unwrap();
+        let converted_query = result["query"].as_str().unwrap();
+        println!("Converted query: {}", converted_query);
+        
+        // Check that both operators are properly converted
+        assert!(
+            converted_query.contains("amount: {_gt: 100}"),
+            "Expected amount: {{_gt: 100}} in converted query, got: {}",
+            converted_query
+        );
+        assert!(
+            converted_query.contains("amount: {_lte: 1000}"),
+            "Expected amount: {{_lte: 1000}} in converted query, got: {}",
+            converted_query
+        );
+    }
+
 }
